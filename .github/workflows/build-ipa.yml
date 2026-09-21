@@ -37,6 +37,7 @@ jobs:
         run: |
           xcodebuild \
             -resolvePackageDependencies \
+            -skipMacroValidation \
             -project localLLM.xcodeproj \
             -scheme localLLM
 
@@ -46,6 +47,7 @@ jobs:
           xcodebuild \
             -project localLLM.xcodeproj \
             -scheme localLLM \
+            -skipMacroValidation \
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
