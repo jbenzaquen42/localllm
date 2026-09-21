@@ -84,44 +84,74 @@ jobs:
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             APP_VERSION="${GITHUB_REF_NAME#v}"
+            DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/PrivAI-SideStore.ipa"
           else
             APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/localLLM.app/Info.plist")"
+            DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/PrivAI-SideStore.ipa"
           fi
+
           IPA_SIZE="$(stat -f%z PrivAI-SideStore.ipa)"
           RELEASE_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
-          jq -n \
+          git fetch origin main
+          PREVIOUS_SOURCE="$RUNNER_TEMP/previous-source.json"
+          if git show origin/main:source.json > "$PREVIOUS_SOURCE" 2>/dev/null; then
+            echo "Preserving existing SideStore version history"
+          else
+            : > "$PREVIOUS_SOURCE"
+          fi
+
+          NEW_VERSION=$(jq -n \
             --arg version "$APP_VERSION" \
             --arg date "$RELEASE_DATE" \
-            --arg downloadURL "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/PrivAI-SideStore.ipa" \
+            --arg downloadURL "$DOWNLOAD_URL" \
             --argjson size "$IPA_SIZE" \
             '{
-              name: "Priv AI",
-              identifier: "com.jbenzaquen42.privai.source",
-              subtitle: "Private on-device AI for iPhone",
-              description: "Install and update Priv AI through SideStore.",
-              website: "https://github.com/jbenzaquen42/localllm",
-              sourceURL: "https://github.com/jbenzaquen42/localllm/releases/latest/download/sidestore.json",
-              apps: [{
-                name: "Priv AI",
-                bundleIdentifier: "com.jbenzaquen42.PrivAI",
-                developerName: "Jacob Benzaquen",
-                subtitle: "Local GGUF, MLX, and Swiftlet inference",
-                localizedDescription: "Run private language models on your iPhone, including GGUF, native MLX checkpoints, and Swiftlet QPack models.",
-                iconURL: "https://raw.githubusercontent.com/jbenzaquen42/localllm/main/AppIcon.png",
-                tintColor: "2864DC",
-                versions: [{
-                  version: $version,
-                  date: $date,
-                  localizedDescription: "Adds Hugging Face repository import, quantization selection, and native MLX model support.",
-                  downloadURL: $downloadURL,
-                  size: $size,
-                  minOSVersion: "17.0"
-                }]
-              }]
-            }' > sidestore.json
+              version: $version,
+              date: $date,
+              localizedDescription: "Latest Priv AI build with local GGUF, MLX, and Swiftlet inference improvements.",
+              downloadURL: $downloadURL,
+              size: $size,
+              minOSVersion: "17.0"
+            }')
 
-          jq empty sidestore.json
+          if [ -s "$PREVIOUS_SOURCE" ]; then
+            jq \
+              --argjson newVersion "$NEW_VERSION" \
+              '.name = "Jacob\u0027s Apps"
+               | .identifier = "com.jbenzaquen42.privai.source"
+               | .sourceURL = "https://raw.githubusercontent.com/jbenzaquen42/localllm/main/source.json"
+               | .apps[0].name = "Priv AI"
+               | .apps[0].bundleIdentifier = "com.jbenzaquen42.PrivAI"
+               | .apps[0].developerName = "Jacob Benzaquen"
+               | .apps[0].subtitle = "Local GGUF, MLX, and Swiftlet inference"
+               | .apps[0].localizedDescription = "Run private language models directly on your iPhone, including GGUF, native MLX checkpoints, and Swiftlet QPack models."
+               | .apps[0].iconURL = "https://raw.githubusercontent.com/jbenzaquen42/localllm/main/AppIcon.png"
+               | .apps[0].tintColor = "2864DC"
+               | .apps[0].versions = ([$newVersion] + [ .apps[0].versions[]? | select(.version != $newVersion.version) ])' \
+              "$PREVIOUS_SOURCE" > source.json
+          else
+            jq -n \
+              --argjson version "$NEW_VERSION" \
+              '{
+                name: "Jacob\u0027s Apps",
+                identifier: "com.jbenzaquen42.privai.source",
+                sourceURL: "https://raw.githubusercontent.com/jbenzaquen42/localllm/main/source.json",
+                apps: [{
+                  name: "Priv AI",
+                  bundleIdentifier: "com.jbenzaquen42.PrivAI",
+                  developerName: "Jacob Benzaquen",
+                  subtitle: "Local GGUF, MLX, and Swiftlet inference",
+                  localizedDescription: "Run private language models directly on your iPhone, including GGUF, native MLX checkpoints, and Swiftlet QPack models.",
+                  iconURL: "https://raw.githubusercontent.com/jbenzaquen42/localllm/main/AppIcon.png",
+                  tintColor: "2864DC",
+                  versions: [$version]
+                }]
+              }' > source.json
+          fi
+
+          jq empty source.json
+          cat source.json
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
@@ -129,7 +159,7 @@ jobs:
           name: PrivAI-SideStore
           path: |
             PrivAI-SideStore.ipa
-            sidestore.json
+            source.json
           if-no-files-found: error
           retention-days: 30
 
@@ -138,11 +168,37 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            PrivAI-SideStore.ipa \
-            sidestore.json \
-            --title "Priv AI $GITHUB_REF_NAME" \
-            --generate-notes
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" \
+              PrivAI-SideStore.ipa \
+              source.json \
+              --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              PrivAI-SideStore.ipa \
+              source.json \
+              --title "Priv AI $GITHUB_REF_NAME" \
+              --generate-notes
+          fi
+
+      - name: Update canonical SideStore feed
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          cp source.json "$RUNNER_TEMP/source.json"
+          git fetch origin main
+          git checkout main
+          cp "$RUNNER_TEMP/source.json" source.json
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add source.json
+
+          if git diff --cached --quiet; then
+            echo "source.json is already current"
+          else
+            git commit -m "Update SideStore feed for $GITHUB_REF_NAME"
+            git push origin main
+          fi
 
       - name: Upload build log if build fails
         if: failure()
