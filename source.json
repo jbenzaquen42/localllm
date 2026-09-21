@@ -1,0 +1,26 @@
+{
+  "name": "Jacob's Apps",
+  "identifier": "com.jbenzaquen42.privai.source",
+  "sourceURL": "https://raw.githubusercontent.com/jbenzaquen42/localllm/main/source.json",
+  "apps": [
+    {
+      "name": "Priv AI",
+      "bundleIdentifier": "com.jbenzaquen42.PrivAI",
+      "developerName": "Jacob Benzaquen",
+      "subtitle": "Local GGUF, MLX, and Swiftlet inference",
+      "localizedDescription": "Run private language models directly on your iPhone, including GGUF, native MLX checkpoints, and Swiftlet QPack models.",
+      "iconURL": "https://raw.githubusercontent.com/jbenzaquen42/localllm/main/AppIcon.png",
+      "tintColor": "2864DC",
+      "versions": [
+        {
+          "version": "1.1.0",
+          "date": "2026-09-21T23:26:28Z",
+          "localizedDescription": "Adds native MLX Swift LM support, Hugging Face repository URL import with quantization and format selection, and the SideStore update feed.",
+          "downloadURL": "https://github.com/jbenzaquen42/localllm/releases/download/v1.1.0/PrivAI-SideStore.ipa",
+          "size": 19864282,
+          "minOSVersion": "17.0"
+        }
+      ]
+    }
+  ]
+}
