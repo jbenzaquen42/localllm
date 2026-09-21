@@ -1,0 +1,91 @@
+name: Build SideStore IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "localLLM/**"
+      - "localLLM.xcodeproj/**"
+      - ".github/workflows/build-ipa.yml"
+
+jobs:
+  build:
+    name: Build unsigned iPhone IPA
+    runs-on: macos-26
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout Priv AI
+        uses: actions/checkout@v4
+
+      - name: Checkout Swiftlet sibling dependency
+        run: |
+          git clone --depth 1 https://github.com/leonickson1/Swiftlet.git ../swiftlet
+
+      - name: Select Xcode 26.2
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Resolve Swift packages
+        run: |
+          xcodebuild \
+            -resolvePackageDependencies \
+            -project localLLM.xcodeproj \
+            -scheme localLLM
+
+      - name: Build unsigned iPhone app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project localLLM.xcodeproj \
+            -scheme localLLM \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            PRODUCT_BUNDLE_IDENTIFIER=com.jbenzaquen42.PrivAI \
+            DEVELOPMENT_TEAM='' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            build \
+            | tee "$RUNNER_TEMP/xcodebuild.log"
+
+      - name: Package IPA
+        run: |
+          APP_PATH="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/localLLM.app"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Expected app bundle not found at: $APP_PATH"
+            find "$RUNNER_TEMP/DerivedData/Build/Products" -maxdepth 3 -type d -name '*.app' -print || true
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$APP_PATH" "$RUNNER_TEMP/ipa/Payload/"
+
+          cd "$RUNNER_TEMP/ipa"
+          /usr/bin/zip -qry "$GITHUB_WORKSPACE/PrivAI-SideStore.ipa" Payload
+
+          echo "IPA created:"
+          ls -lh "$GITHUB_WORKSPACE/PrivAI-SideStore.ipa"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrivAI-SideStore
+          path: PrivAI-SideStore.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build log if build fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: ${{ runner.temp }}/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
