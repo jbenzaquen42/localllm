@@ -29,7 +29,7 @@ actor InferenceEngine {
         llama_backend_init()
 
         var modelParams = llama_model_default_params()
-        modelParams.use_mmap = true
+        modelParams.load_mode = LLAMA_LOAD_MODE_MMAP
 
         guard let m = llama_model_load_from_file(path, modelParams) else {
             throw InferenceError.failedToLoadModel(path)
@@ -240,3 +240,4 @@ enum InferenceError: LocalizedError {
         }
     }
 }
+
