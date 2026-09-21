@@ -50,7 +50,11 @@ final class MLXEngine: ObservableObject {
 
         do {
             let configuration = ModelConfiguration(id: model.name)
-            let loaded: MLXLMCommon.ModelContainer = try await #huggingFaceLoadModelContainer(
+            let downloader: any MLXLMCommon.Downloader = #hubDownloader()
+            let tokenizerLoader: any MLXLMCommon.TokenizerLoader = #huggingFaceTokenizerLoader()
+            let loaded: MLXLMCommon.ModelContainer = try await MLXLMCommon.loadModelContainer(
+                from: downloader,
+                using: tokenizerLoader,
                 configuration: configuration,
                 progressHandler: { [weak self] (value: Progress) in
                     let fraction = value.fractionCompleted
