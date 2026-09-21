@@ -4,6 +4,7 @@
 //
 
 import Foundation
+import HuggingFace
 
 enum ChatTemplate: String, Codable {
     case chatml      // <|im_start|>system\n...<|im_end|>
@@ -21,6 +22,9 @@ enum ModelFormat: String, Codable {
     /// far larger than RAM; experts stream from storage on demand, so RAM-fit
     /// gating does not apply).
     case swiftlet
+    /// Hugging Face MLX checkpoint (safetensors + tokenizer/config files),
+    /// downloaded and executed by MLX Swift LM on Apple silicon.
+    case mlx
 }
 
 struct AIModel: Identifiable, Codable, Hashable {
@@ -72,6 +76,12 @@ struct AIModel: Identifiable, Codable, Hashable {
         case .swiftlet:
             // Directory checkpoint (config.json + safetensors + tokenizer).
             return modelsDir.appendingPathComponent(id, isDirectory: true)
+        case .mlx:
+            if let repo = HuggingFace.Repo.ID(rawValue: name) {
+                return HuggingFace.HubCache.default.repoDirectory(repo: repo, kind: .model)
+            }
+            let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+            return caches.appendingPathComponent("huggingface/hub/invalid-repository", isDirectory: true)
         }
     }
 

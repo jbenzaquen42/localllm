@@ -49,6 +49,7 @@ struct ChatView: View {
     @EnvironmentObject var openAICompat: OpenAICompatibleService
     @EnvironmentObject var historyManager: ChatHistoryManager
     @StateObject private var swiftletEngine = SwiftletEngine.shared
+    @StateObject private var mlxEngine = MLXEngine.shared
     @State private var currentSessionId: UUID = UUID()
     @State private var messages: [ChatMessage] = []
 
@@ -191,7 +192,7 @@ struct ChatView: View {
                                     isGenerating: $isGenerating,
                                     selectedImage: $selectedImage,
                                     activeContext: $activeContext,
-                                    chatOnlyModel: model.engineFormat == .swiftlet,
+                                    chatOnlyModel: model.engineFormat != .gguf,
                                     isFocused: $isInputFocused,
                                     onPhotoPick: { showPhotoPicker = true },
                                     onDocumentPick: { isImporting = true },
@@ -371,7 +372,7 @@ struct ChatView: View {
                                 isGenerating: $isGenerating,
                                 selectedImage: $selectedImage,
                                 activeContext: $activeContext,
-                                chatOnlyModel: model.engineFormat == .swiftlet,
+                                chatOnlyModel: model.engineFormat != .gguf,
                                 isFocused: $isInputFocused,
                                 onPhotoPick: { showPhotoPicker = true },
                                 onDocumentPick: { isImporting = true },
@@ -444,7 +445,7 @@ struct ChatView: View {
         .navigationDestination(isPresented: $navigateToExperimental) { ExperimentalModelsView() }
         .onChange(of: model.id) { _, _ in
             // The experimental model is chat-only: force the General context.
-            if model.engineFormat == .swiftlet { activeContext = .general }
+            if model.engineFormat != .gguf { activeContext = .general }
         }
         .onAppear {
             if let ctx = initialContext {
@@ -478,6 +479,14 @@ struct ChatView: View {
             if FileManager.default.fileExists(atPath: model.localPath.path) {
                 await swiftletEngine.loadModel(model)
                 if let error = swiftletEngine.loadError { modelLoadError = error }
+            }
+            return
+        }
+        if model.engineFormat == .mlx {
+            guard mlxEngine.currentModelId != model.id || !mlxEngine.isModelLoaded else { return }
+            if FileManager.default.fileExists(atPath: model.localPath.path) {
+                await mlxEngine.loadModel(model)
+                if let error = mlxEngine.loadError { modelLoadError = error }
             }
             return
         }
@@ -682,7 +691,8 @@ struct ChatView: View {
         let useOpenAICompat = openAICompat.isEnabled && openAICompat.isConnected && !openAICompat.selectedModel.isEmpty
         let useOllama = !useOpenAICompat && ollamaService.isEnabled && ollamaService.isConnected && !ollamaService.selectedModel.isEmpty
         let useSwiftlet = !useOpenAICompat && !useOllama && model.engineFormat == .swiftlet
-        if useSwiftlet && activeContext != .general {
+        let useMLX = !useOpenAICompat && !useOllama && model.engineFormat == .mlx
+        if (useSwiftlet || useMLX) && activeContext != .general {
             let notice = ChatMessage(
                 content: "Health, Finance, and Journal contexts aren't available with this experimental model. It supports general chat only. Switch the context back to General, or download a smaller model (like Qwen 2.5 1.5B) for those features.",
                 isUser: false, timestamp: Date()
@@ -693,7 +703,8 @@ struct ChatView: View {
         if useOpenAICompat || useOllama { inferenceManager.setOllamaContext() }
 
         guard inferenceManager.isModelLoaded || useOllama || useOpenAICompat
-                || (useSwiftlet && swiftletEngine.isModelLoaded) else {
+                || (useSwiftlet && swiftletEngine.isModelLoaded)
+                || (useMLX && mlxEngine.isModelLoaded) else {
             let errorMsg = ChatMessage(
                 content: "No model available. Download a local model, or connect to Ollama / an OpenAI-compatible server in Settings.",
                 isUser: false, timestamp: Date()
@@ -787,6 +798,19 @@ struct ChatView: View {
                         messages[index].content += token
                     }
                 }
+            } else if useMLX {
+                let mlxSystem = "You are a helpful AI assistant running locally on the user's device. Answer clearly and completely. All processing happens on-device for privacy."
+                var chatTurns: [[String: String]] = [["role": "system", "content": mlxSystem]]
+                chatTurns += conversationTurns.map { ["role": $0.role, "content": $0.content] }
+                let stream = mlxEngine.streamChat(
+                    messages: chatTurns,
+                    maxTokens: parameterStore.asModelParameters.maxTokens
+                )
+                for await token in stream {
+                    if let index = messages.firstIndex(where: { $0.id == messageId }) {
+                        messages[index].content += token
+                    }
+                }
             } else {
                 let fullPrompt = PromptFormatter.format(
                     systemPrompt: systemPrompt,
@@ -807,9 +831,12 @@ struct ChatView: View {
 
             // Stamp benchmark data onto the finished message
             if let index = messages.firstIndex(where: { $0.id == messageId }) {
-                let tps = useSwiftlet ? swiftletEngine.tokensPerSecond : inferenceManager.tokensPerSecond
-                let ttft = useSwiftlet ? swiftletEngine.timeToFirstToken : inferenceManager.timeToFirstToken
-                let total = useSwiftlet ? swiftletEngine.totalTokens : inferenceManager.totalTokens
+                let tps = useMLX ? mlxEngine.tokensPerSecond
+                    : (useSwiftlet ? swiftletEngine.tokensPerSecond : inferenceManager.tokensPerSecond)
+                let ttft = useMLX ? mlxEngine.timeToFirstToken
+                    : (useSwiftlet ? swiftletEngine.timeToFirstToken : inferenceManager.timeToFirstToken)
+                let total = useMLX ? mlxEngine.totalTokens
+                    : (useSwiftlet ? swiftletEngine.totalTokens : inferenceManager.totalTokens)
                 messages[index].tokensPerSecond = tps > 0 ? tps : nil
                 messages[index].timeToFirstToken = ttft > 0 ? ttft : nil
                 messages[index].totalTokens = total > 0 ? total : nil

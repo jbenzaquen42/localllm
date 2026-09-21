@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
     paths:
       - "localLLM/**"
       - "localLLM.xcodeproj/**"
@@ -14,7 +16,9 @@ jobs:
   build:
     name: Build unsigned iPhone IPA
     runs-on: macos-26
-    timeout-minutes: 45
+    timeout-minutes: 75
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout Priv AI
@@ -73,13 +77,70 @@ jobs:
           echo "IPA created:"
           ls -lh "$GITHUB_WORKSPACE/PrivAI-SideStore.ipa"
 
+      - name: Generate SideStore source
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            APP_VERSION="${GITHUB_REF_NAME#v}"
+          else
+            APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/localLLM.app/Info.plist")"
+          fi
+          IPA_SIZE="$(stat -f%z PrivAI-SideStore.ipa)"
+          RELEASE_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+          jq -n \
+            --arg version "$APP_VERSION" \
+            --arg date "$RELEASE_DATE" \
+            --arg downloadURL "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/PrivAI-SideStore.ipa" \
+            --argjson size "$IPA_SIZE" \
+            '{
+              name: "Priv AI",
+              identifier: "com.jbenzaquen42.privai.source",
+              subtitle: "Private on-device AI for iPhone",
+              description: "Install and update Priv AI through SideStore.",
+              website: "https://github.com/jbenzaquen42/localllm",
+              sourceURL: "https://github.com/jbenzaquen42/localllm/releases/latest/download/sidestore.json",
+              apps: [{
+                name: "Priv AI",
+                bundleIdentifier: "com.jbenzaquen42.PrivAI",
+                developerName: "Jacob Benzaquen",
+                subtitle: "Local GGUF, MLX, and Swiftlet inference",
+                localizedDescription: "Run private language models on your iPhone, including GGUF, native MLX checkpoints, and Swiftlet QPack models.",
+                iconURL: "https://raw.githubusercontent.com/jbenzaquen42/localllm/main/AppIcon.png",
+                tintColor: "2864DC",
+                versions: [{
+                  version: $version,
+                  date: $date,
+                  localizedDescription: "Adds Hugging Face repository import, quantization selection, and native MLX model support.",
+                  downloadURL: $downloadURL,
+                  size: $size,
+                  minOSVersion: "17.0"
+                }]
+              }]
+            }' > sidestore.json
+
+          jq empty sidestore.json
+
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: PrivAI-SideStore
-          path: PrivAI-SideStore.ipa
+          path: |
+            PrivAI-SideStore.ipa
+            sidestore.json
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish SideStore release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            PrivAI-SideStore.ipa \
+            sidestore.json \
+            --title "Priv AI $GITHUB_REF_NAME" \
+            --generate-notes
 
       - name: Upload build log if build fails
         if: failure()

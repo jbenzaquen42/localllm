@@ -482,7 +482,7 @@ struct FinanceDashboardView: View {
                                 if modelManager.firstAssistCapableModel != nil {
                                     Menu {
                                         // Chat-only models (experimental 35B) can't do extraction.
-                                        ForEach(modelManager.downloadedModels.filter { $0.engineFormat != .swiftlet }) { m in
+                                        ForEach(modelManager.downloadedModels.filter { $0.engineFormat == .gguf }) { m in
                                             Button(m.displayName) {
                                                 Task { await inferenceManager.loadModel(m) }
                                             }

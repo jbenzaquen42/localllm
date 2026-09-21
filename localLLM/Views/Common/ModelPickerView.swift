@@ -13,6 +13,7 @@ struct ModelPickerView: View {
     @EnvironmentObject var ollamaService: OllamaService
     @EnvironmentObject var openAICompat: OpenAICompatibleService
     @ObservedObject var swiftletEngine = SwiftletEngine.shared
+    @ObservedObject var mlxEngine = MLXEngine.shared
     @Binding var selectedModel: AIModel
     @State private var navigateToModels = false
 
@@ -97,6 +98,8 @@ struct ModelPickerView: View {
                                 // engine; the GGUF validator would reject them.
                                 if model.engineFormat == .swiftlet {
                                     await SwiftletEngine.shared.loadModel(model)
+                                } else if model.engineFormat == .mlx {
+                                    await MLXEngine.shared.loadModel(model)
                                 } else {
                                     await inferenceManager.loadModel(model)
                                 }
@@ -107,7 +110,8 @@ struct ModelPickerView: View {
                                 Text(model.formattedSize)
                                 if !isUsingOllama && !isUsingOpenAICompat
                                     && (inferenceManager.currentModelId == model.id
-                                        || SwiftletEngine.shared.currentModelId == model.id) {
+                                        || SwiftletEngine.shared.currentModelId == model.id
+                                        || MLXEngine.shared.currentModelId == model.id) {
                                     Image(systemName: "checkmark")
                                 }
                             }
@@ -145,7 +149,7 @@ struct ModelPickerView: View {
                 } else if downloadedModels.isEmpty && !isUsingOllama && !isUsingOpenAICompat {
                     Text("No Model")
                         .font(.system(size: 13, weight: .semibold))
-                } else if inferenceManager.loadingModelId != nil || swiftletEngine.isLoading {
+                } else if inferenceManager.loadingModelId != nil || swiftletEngine.isLoading || mlxEngine.isLoading {
                     ProgressView()
                         .scaleEffect(0.7)
                     Text("Loading...")
@@ -153,7 +157,7 @@ struct ModelPickerView: View {
                         .lineLimit(1)
                 } else {
                     // Loaded state can come from either engine.
-                    Text(inferenceManager.isModelLoaded || swiftletEngine.isModelLoaded
+                    Text(inferenceManager.isModelLoaded || swiftletEngine.isModelLoaded || mlxEngine.isModelLoaded
                          ? selectedModel.displayName : "Select Model")
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
@@ -178,7 +182,7 @@ struct ModelPickerView: View {
         if isUsingOpenAICompat && !openAICompat.selectedModel.isEmpty { return .green }
         if isUsingOllama && !ollamaService.selectedModel.isEmpty { return .green }
         if downloadedModels.isEmpty { return .red }
-        if inferenceManager.isModelLoaded { return .green }
+        if inferenceManager.isModelLoaded || swiftletEngine.isModelLoaded || mlxEngine.isModelLoaded { return .green }
         return .orange
     }
 }

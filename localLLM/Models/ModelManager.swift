@@ -39,6 +39,7 @@ class ModelManager: NSObject, ObservableObject {
 
     private var downloadTasks: [String: URLSessionDownloadTask] = [:]
     private var downloadSessions: [String: URLSession] = [:]
+    private var mlxDownloadTasks: [String: Task<Void, Never>] = [:]
 
     private static let modelsDirectoryName = "Models"
 
@@ -102,6 +103,9 @@ class ModelManager: NSObject, ObservableObject {
                 exists = FileManager.default.fileExists(
                     atPath: localPath.appendingPathComponent("manifest.json").path)
             }
+            if exists, models[i].engineFormat == .mlx {
+                exists = Self.isCompleteMLXRepository(at: localPath)
+            }
             models[i].isDownloaded = exists
             models[i].downloadProgress = exists ? 1.0 : 0.0
             if exists {
@@ -137,6 +141,10 @@ class ModelManager: NSObject, ObservableObject {
         // resumable if interrupted (tap Download again to continue).
         if model.engineFormat == .swiftlet {
             downloadSwiftletModel(model, at: index)
+            return
+        }
+        if model.engineFormat == .mlx {
+            downloadMLXModel(model, at: index)
             return
         }
 
@@ -245,6 +253,8 @@ class ModelManager: NSObject, ObservableObject {
                         self.availableModels[i].isDownloaded = true
                     }
                     self.downloadedModels.append(model)
+                    self.updateTaskModels()
+                    self.saveCustomModels()
                     print("[ModelManager] streamed install complete: \(model.id)")
                 }
             } catch {
@@ -279,10 +289,68 @@ class ModelManager: NSObject, ObservableObject {
     }
     private var swiftletCancelFlags: [String: CancelFlag] = [:]
 
+    private func downloadMLXModel(_ model: AIModel, at index: Int) {
+        if let availableSpace = availableDiskSpace(), availableSpace < model.modelSize + 1_000_000_000 {
+            downloadError = "Not enough free space: this MLX model needs about \(model.formattedSize) plus headroom."
+            return
+        }
+
+        downloadError = nil
+        availableModels[index].isDownloading = true
+        availableModels[index].downloadProgress = 0
+
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await MLXEngine.shared.loadModel(model) { fraction in
+                guard let i = self.availableModels.firstIndex(where: { $0.id == model.id }) else { return }
+                self.availableModels[i].downloadProgress = min(1, max(0, fraction))
+            }
+
+            self.mlxDownloadTasks.removeValue(forKey: model.id)
+            guard let i = self.availableModels.firstIndex(where: { $0.id == model.id }) else { return }
+            self.availableModels[i].isDownloading = false
+
+            if MLXEngine.shared.currentModelId == model.id, MLXEngine.shared.isModelLoaded {
+                self.availableModels[i].downloadProgress = 1
+                self.availableModels[i].isDownloaded = true
+                if !self.downloadedModels.contains(where: { $0.id == model.id }) {
+                    self.downloadedModels.append(self.availableModels[i])
+                }
+                self.updateTaskModels()
+                self.saveCustomModels()
+            } else if !Task.isCancelled {
+                self.availableModels[i].downloadProgress = 0
+                self.downloadError = MLXEngine.shared.loadError ?? "MLX model download failed."
+            }
+        }
+        mlxDownloadTasks[model.id] = task
+    }
+
+    private static func isCompleteMLXRepository(at repository: URL) -> Bool {
+        guard let enumerator = FileManager.default.enumerator(
+            at: repository,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return false }
+
+        var hasConfig = false
+        var hasWeights = false
+        for case let file as URL in enumerator {
+            let name = file.lastPathComponent.lowercased()
+            if name == "config.json" { hasConfig = true }
+            if name.hasSuffix(".safetensors") { hasWeights = true }
+            if hasConfig && hasWeights { return true }
+        }
+        return false
+    }
+
     /// First downloaded model that can serve Health/Finance/Journal features.
     /// The experimental streamed 35B is chat-only, so it never qualifies.
     var firstAssistCapableModel: AIModel? {
-        downloadedModels.first { $0.engineFormat != .swiftlet }
+        downloadedModels.first {
+            $0.taskIds.contains(BuiltInTaskID.llmHealth.rawValue)
+                || $0.taskIds.contains(BuiltInTaskID.llmFinance.rawValue)
+        }
     }
 
     /// True when models are installed but every one of them is chat-only —
@@ -297,6 +365,8 @@ class ModelManager: NSObject, ObservableObject {
         downloadSessions[model.id]?.invalidateAndCancel()
         downloadSessions.removeValue(forKey: model.id)
         swiftletCancelFlags[model.id]?.set()
+        mlxDownloadTasks[model.id]?.cancel()
+        mlxDownloadTasks.removeValue(forKey: model.id)
 
         if let index = availableModels.firstIndex(where: { $0.id == model.id }) {
             availableModels[index].isDownloading = false
@@ -316,6 +386,13 @@ class ModelManager: NSObject, ObservableObject {
             Task { @MainActor in
                 if SwiftletEngine.shared.currentModelId == model.id {
                     SwiftletEngine.shared.unload()
+                }
+            }
+        }
+        if model.engineFormat == .mlx {
+            Task { @MainActor in
+                if MLXEngine.shared.currentModelId == model.id {
+                    MLXEngine.shared.unload()
                 }
             }
         }
@@ -390,6 +467,19 @@ class ModelManager: NSObject, ObservableObject {
         } catch {
             print("Error importing model: \(error)")
         }
+    }
+
+    /// Registers a model discovered from a pasted Hugging Face repository and
+    /// starts it through the normal download path.
+    func addAndDownloadRemoteModel(_ model: AIModel) {
+        if let index = availableModels.firstIndex(where: { $0.id == model.id }) {
+            availableModels[index] = model
+        } else {
+            availableModels.append(model)
+        }
+        updateTaskModels()
+        saveCustomModels()
+        downloadModel(model)
     }
 
     // MARK: - Storage

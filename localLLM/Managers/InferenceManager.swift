@@ -345,8 +345,8 @@ class InferenceManager: ObservableObject {
         // Streamed models are chat-only for now: every non-chat feature
         // (Health, Finance, Journal, task labs) loads through this manager,
         // so one guard gives them all a clear, honest message.
-        if model.engineFormat == .swiftlet {
-            loadError = "\(model.displayName) is experimental and supports Chat only. For Health, Finance, and Journal, download a smaller model like Qwen 2.5 1.5B."
+        if model.engineFormat != .gguf {
+            loadError = "\(model.displayName) uses its own chat engine. For Health, Finance, and Journal, select a GGUF model."
             loadingModelId = nil
             return
         }

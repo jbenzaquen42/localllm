@@ -25,6 +25,7 @@ Private AI assistant that runs entirely on your device. No cloud, no accounts, n
 ## What it does
 
 - **Chat** with AI models downloaded to your device
+- **Paste a Hugging Face model page** and choose a compatible GGUF quant, native MLX checkpoint, or Swiftlet QPack option before downloading
 - **Experimental: a 35-billion-parameter model on your iPhone.** [Qwen 3.6 35B](https://huggingface.co/Leonickson/Qwen3.6-35B-A3B-qpack) streams its weights from storage via the [Swiftlet](https://github.com/leonickson1/Swiftlet) engine instead of loading into memory, so it runs in about 2.5 GB of RAM. Find it in Settings under Experimental Models. This ships in the newest app version, which may still be in App Store review; if you do not see it yet, check back in a couple of days, or build the app from source below to try it today.
 - **Health insights** from Apple HealthKit data with AI coaching
 - **Finance tracking** from uploaded bank/credit card statements (PDF or image)
@@ -35,7 +36,9 @@ Everything stays on your device. The app works offline after you download a mode
 
 ## How it works
 
-Regular models run through [llama.cpp](https://github.com/ggerganov/llama.cpp) using GGUF format. The app includes a catalog of models from Hugging Face (SmolLM2, Qwen2.5, Llama 3.2, Phi 3.5, Gemma, Mistral) ranging from 360M to 7B parameters.
+Regular models run through [llama.cpp](https://github.com/ggerganov/llama.cpp) using GGUF format. Apple MLX repositories run natively through [MLX Swift LM](https://github.com/ml-explore/mlx-swift-lm). The app includes a catalog of models from Hugging Face (SmolLM2, Qwen2.5, Llama 3.2, Phi 3.5, Gemma, Mistral) ranging from 360M to 7B parameters.
+
+To add another model, open **Models**, tap **+**, then **Add Hugging Face Model**. Paste the main repository page (for example, `https://huggingface.co/mlx-community/Llama-3.2-1B-Instruct-4bit`) and select the format or quantization shown by the app. MLX support covers architectures implemented by MLX Swift LM; an arbitrary safetensors repository is not automatically compatible.
 
 The experimental 35B runs on Swiftlet, a Swift + Metal engine that keeps a small dense core resident and streams the model's Mixture-of-Experts weights from storage per token. The model itself comes from [Hugging Face](https://huggingface.co/Leonickson/Qwen3.6-35B-A3B-qpack) as a resumable in-app download of about 18 GB.
 
@@ -70,6 +73,16 @@ open localLLM.xcodeproj
 7. Hit **Cmd+R** to build and run
 8. On first launch, accept the terms screen and download a model from the built-in catalog
 
+## SideStore
+
+Tagged releases publish both the unsigned IPA and a SideStore-compatible source. After the first `v*` release is available, add this source URL in SideStore:
+
+```text
+https://github.com/jbenzaquen42/localllm/releases/latest/download/sidestore.json
+```
+
+The feed points to the matching release IPA, so future tagged releases appear as updates in SideStore.
+
 > **Apple Developer account note:** A free account is fine for running it on your own device. HealthKit capability works on free accounts for personal builds, you don't need the paid $99/yr program unless you want to distribute via TestFlight or the App Store.
 
 ### Troubleshooting
@@ -98,6 +111,7 @@ Then connect from Settings in the app using your Mac's local IP (e.g. `192.168.1
 | Layer | Tech |
 |-------|------|
 | Inference | llama.cpp via [llama.swift](https://github.com/mattt/llama.swift) |
+| Native Apple inference | [MLX Swift LM](https://github.com/ml-explore/mlx-swift-lm) |
 | Streamed 35B (experimental) | Swiftlet, Swift + Metal Mixture-of-Experts streaming |
 | Health | HealthKit |
 | Finance | PDFKit + Vision OCR + LLM categorization |

@@ -11,6 +11,7 @@ struct ModelsView: View {
     @State private var selectedSegment = 0
     @State private var searchText = ""
     @State private var showImportSheet = false
+    @State private var showRepositorySheet = false
 
     var filteredModels: [AIModel] {
         let models: [AIModel]
@@ -104,6 +105,11 @@ struct ModelsView: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Menu {
                         Button {
+                            showRepositorySheet = true
+                        } label: {
+                            Label("Add Hugging Face Model", systemImage: "link.badge.plus")
+                        }
+                        Button {
                             showImportSheet = true
                         } label: {
                             Label("Import GGUF File", systemImage: "doc.badge.plus")
@@ -129,6 +135,9 @@ struct ModelsView: View {
             .sheet(isPresented: $showImportSheet) {
                 ImportModelSheet()
             }
+            .sheet(isPresented: $showRepositorySheet) {
+                HuggingFaceRepositorySheet()
+            }
             .overlay {
                 if filteredModels.isEmpty && selectedSegment != 1 {
                     EmptyModelsListView(isDownloaded: selectedSegment == 2)
@@ -143,6 +152,165 @@ struct ModelsView: View {
                 Text(modelManager.downloadError ?? "")
             }
             .navigationTitle("Models")
+    }
+}
+
+// MARK: - Hugging Face repository import
+
+struct HuggingFaceRepositorySheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var modelManager: ModelManager
+    @EnvironmentObject private var huggingFaceService: HuggingFaceService
+
+    @State private var repositoryURL = ""
+    @State private var inspection: HuggingFaceRepositoryInspection?
+    @State private var selectedOptionID: String?
+    @State private var isInspecting = false
+    @State private var errorMessage: String?
+
+    private var selectedOption: HuggingFaceDownloadOption? {
+        guard let selectedOptionID else { return nil }
+        return inspection?.options.first { $0.id == selectedOptionID }
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Hugging Face model page")
+                            .font(.headline)
+                        TextField("https://huggingface.co/owner/model", text: $repositoryURL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.URL)
+                            .textFieldStyle(.roundedBorder)
+                            .submitLabel(.go)
+                            .onSubmit { inspect() }
+
+                        Button(action: inspect) {
+                            HStack {
+                                if isInspecting { ProgressView().controlSize(.small) }
+                                Text(isInspecting ? "Checking repository…" : "Find compatible options")
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 11)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isInspecting || repositoryURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+
+                    if let inspection {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(inspection.displayName)
+                                .font(.title3.bold())
+                            Text(inspection.repoID)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Text("Choose format or quantization")
+                            .font(.headline)
+
+                        VStack(spacing: 10) {
+                            ForEach(inspection.options) { option in
+                                Button {
+                                    selectedOptionID = option.id
+                                } label: {
+                                    HStack(spacing: 12) {
+                                        Image(systemName: selectedOptionID == option.id
+                                              ? "checkmark.circle.fill" : "circle")
+                                            .foregroundStyle(selectedOptionID == option.id ? .blue : .secondary)
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            HStack {
+                                                Text(option.title).font(.subheadline.bold())
+                                                Text(option.kind.rawValue.uppercased())
+                                                    .font(.caption2.bold())
+                                                    .padding(.horizontal, 6)
+                                                    .padding(.vertical, 3)
+                                                    .background(Color.blue.opacity(0.12))
+                                                    .clipShape(Capsule())
+                                                if option.isRecommended {
+                                                    Text("RECOMMENDED")
+                                                        .font(.caption2.bold())
+                                                        .foregroundStyle(.green)
+                                                }
+                                            }
+                                            Text(option.subtitle)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(2)
+                                        }
+                                        Spacer()
+                                        Text(option.formattedSize)
+                                            .font(.caption.monospacedDigit())
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .padding(12)
+                                    .background(Color(uiColor: .secondarySystemBackground))
+                                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .stroke(selectedOptionID == option.id ? Color.blue : Color.primary.opacity(0.08), lineWidth: 1)
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+
+                        if inspection.hasShardedGGUF {
+                            Label("Split GGUF files are shown only when a single-file alternative is available.", systemImage: "info.circle")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Button {
+                            guard let option = selectedOption,
+                                  let model = huggingFaceService.model(from: option, repository: inspection) else { return }
+                            modelManager.addAndDownloadRemoteModel(model)
+                            dismiss()
+                        } label: {
+                            Label("Add and Download", systemImage: "arrow.down.circle.fill")
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 11)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(selectedOption == nil)
+                    }
+
+                    if let errorMessage {
+                        Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle("Add Model")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func inspect() {
+        isInspecting = true
+        inspection = nil
+        selectedOptionID = nil
+        errorMessage = nil
+        Task {
+            do {
+                let result = try await huggingFaceService.inspectRepository(repositoryURL)
+                inspection = result
+                selectedOptionID = result.options.first(where: { $0.isRecommended })?.id ?? result.options.first?.id
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            isInspecting = false
+        }
     }
 }
 
