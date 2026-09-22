@@ -27,6 +27,48 @@ enum ModelFormat: String, Codable {
     case mlx
 }
 
+enum ModelStorageLocation: String, CaseIterable, Identifiable {
+    case files
+    case privateStorage
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .files: return "On My iPhone"
+        case .privateStorage: return "Private App Storage"
+        }
+    }
+    var detail: String {
+        switch self {
+        case .files: return "Files > On My iPhone > Priv AI > Models"
+        case .privateStorage: return "Hidden from Files; still stored only on this device"
+        }
+    }
+}
+
+enum ModelStorage {
+    private static let preferenceKey = "model_storage_location"
+
+    static var current: ModelStorageLocation {
+        get {
+            UserDefaults.standard.string(forKey: preferenceKey)
+                .flatMap(ModelStorageLocation.init(rawValue:)) ?? .files
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: preferenceKey) }
+    }
+
+    static func modelsDirectory(for location: ModelStorageLocation) -> URL {
+        let root: URL
+        switch location {
+        case .files:
+            root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        case .privateStorage:
+            root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        }
+        return root.appendingPathComponent("Models", isDirectory: true)
+    }
+}
+
 struct AIModel: Identifiable, Codable, Hashable {
     let id: String
     let name: String
@@ -47,6 +89,12 @@ struct AIModel: Identifiable, Codable, Hashable {
     var isDownloading: Bool = false
 
     var engineFormat: ModelFormat { format ?? .gguf }
+    var isExperimentalLargeGGUF: Bool {
+        engineFormat == .gguf && modelSize >= 8_000_000_000
+    }
+    var isChatOnly: Bool {
+        taskIds == [BuiltInTaskID.llmChat.rawValue]
+    }
 
     enum CodingKeys: String, CodingKey {
         case id, name, displayName, description, modelUrl, modelSize
@@ -68,8 +116,7 @@ struct AIModel: Identifiable, Codable, Hashable {
     }
 
     var localPath: URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let modelsDir = docs.appendingPathComponent("Models")
+        let modelsDir = ModelStorage.modelsDirectory(for: ModelStorage.current)
         switch engineFormat {
         case .gguf:
             return modelsDir.appendingPathComponent("\(id).gguf")
@@ -327,7 +374,7 @@ extension AIModel {
             displayName: "Qwen 3.6 35B (Experimental)",
             description: "Experimental. A frontier-class 35B that runs from storage. Chat only; first reply takes about 30 seconds. Details in Settings > Experimental Models.",
             modelUrl: "https://huggingface.co/Leonickson/Qwen3.6-35B-A3B-qpack",
-            modelSize: 18_500_000_000,
+            modelSize: 19_535_719_047,
             taskIds: [BuiltInTaskID.llmChat.rawValue],
             huggingFaceUrl: "https://huggingface.co/Leonickson/Qwen3.6-35B-A3B-qpack",
             parameters: defaultParams,

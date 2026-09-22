@@ -101,7 +101,10 @@ struct ModelPickerView: View {
                                 } else if model.engineFormat == .mlx {
                                     await MLXEngine.shared.loadModel(model)
                                 } else {
-                                    await inferenceManager.loadModel(model)
+                                    await inferenceManager.loadModel(
+                                        model,
+                                        forceLoad: model.isExperimentalLargeGGUF
+                                    )
                                 }
                             }
                         } label: {

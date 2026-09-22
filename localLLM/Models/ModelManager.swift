@@ -6,7 +6,20 @@
 import Foundation
 import SwiftletCore
 import Combine
-import UIKit
+
+enum ModelImportError: LocalizedError {
+    case accessDenied
+    case invalidGGUF
+
+    var errorDescription: String? {
+        switch self {
+        case .accessDenied:
+            return "Priv AI could not access that Files item. Download it to On My iPhone and try again."
+        case .invalidGGUF:
+            return "The selected file is not a valid GGUF model."
+        }
+    }
+}
 
 class ModelManager: NSObject, ObservableObject {
     @Published var availableModels: [AIModel] = []
@@ -14,6 +27,7 @@ class ModelManager: NSObject, ObservableObject {
     @Published var isLoadingAllowlist = false
     @Published var tasks: [AITask] = AITask.sampleTasks
     @Published var downloadError: String?
+    @Published private(set) var storageLocation: ModelStorageLocation
 
     /// User's preferred default model id, persisted to UserDefaults.
     /// Set whenever the user actively picks a model. Falls back to first downloaded if missing or deleted.
@@ -38,30 +52,93 @@ class ModelManager: NSObject, ObservableObject {
     }
 
     private var downloadTasks: [String: URLSessionDownloadTask] = [:]
-    private var downloadSessions: [String: URLSession] = [:]
     private var mlxDownloadTasks: [String: Task<Void, Never>] = [:]
 
-    private static let modelsDirectoryName = "Models"
+    /// A background session hands GGUF transfers to iOS so they continue when
+    /// Priv AI is suspended or the screen locks.
+    private lazy var backgroundDownloadSession: URLSession = {
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.jbenzaquen42.PrivAI"
+        let config = URLSessionConfiguration.background(withIdentifier: "\(bundleID).model-downloads")
+        config.sessionSendsLaunchEvents = true
+        config.isDiscretionary = false
+        config.waitsForConnectivity = true
+        config.allowsExpensiveNetworkAccess = true
+        config.allowsConstrainedNetworkAccess = true
+        return URLSession(configuration: config, delegate: self, delegateQueue: .main)
+    }()
 
     override init() {
         // Restore the user's preferred model id (if set previously)
         self.preferredModelId = UserDefaults.standard.string(forKey: Self.preferredModelKey)
+        self.storageLocation = ModelStorage.current
         super.init()
         ensureModelsDirectory()
         loadModelAllowlist()
+        reconnectBackgroundDownloads()
     }
 
     // MARK: - Directory Management
 
     static var modelsDirectory: URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        return docs.appendingPathComponent(modelsDirectoryName)
+        ModelStorage.modelsDirectory(for: ModelStorage.current)
     }
 
-    private func ensureModelsDirectory() {
-        let dir = Self.modelsDirectory
+    private func ensureModelsDirectory(at location: ModelStorageLocation = ModelStorage.current) {
+        var dir = ModelStorage.modelsDirectory(for: location)
         if !FileManager.default.fileExists(atPath: dir.path) {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? dir.setResourceValues(values)
+    }
+
+    /// Moves GGUF and Swiftlet files between the Files-visible and private
+    /// app-owned locations. MLX keeps using its managed Hugging Face cache.
+    @discardableResult
+    func changeStorageLocation(to newLocation: ModelStorageLocation) -> Bool {
+        guard newLocation != storageLocation else { return true }
+        guard !availableModels.contains(where: { $0.isDownloading }) else {
+            downloadError = "Wait for active model downloads to finish before changing storage."
+            return false
+        }
+
+        let oldLocation = storageLocation
+        let source = ModelStorage.modelsDirectory(for: oldLocation)
+        let destination = ModelStorage.modelsDirectory(for: newLocation)
+        ensureModelsDirectory(at: newLocation)
+        var moved: [(from: URL, to: URL)] = []
+
+        do {
+            guard FileManager.default.fileExists(atPath: source.path) else {
+                ModelStorage.current = newLocation
+                storageLocation = newLocation
+                loadModelAllowlist()
+                return true
+            }
+            let items = try FileManager.default.contentsOfDirectory(
+                at: source,
+                includingPropertiesForKeys: nil
+            )
+            for item in items {
+                let target = destination.appendingPathComponent(item.lastPathComponent)
+                guard !FileManager.default.fileExists(atPath: target.path) else {
+                    throw CocoaError(.fileWriteFileExists)
+                }
+                try FileManager.default.moveItem(at: item, to: target)
+                moved.append((from: item, to: target))
+            }
+
+            ModelStorage.current = newLocation
+            storageLocation = newLocation
+            loadModelAllowlist()
+            return true
+        } catch {
+            for pair in moved.reversed() where FileManager.default.fileExists(atPath: pair.to.path) {
+                try? FileManager.default.moveItem(at: pair.to, to: pair.from)
+            }
+            downloadError = "Could not move model files: \(error.localizedDescription)"
+            return false
         }
     }
 
@@ -167,27 +244,32 @@ class ModelManager: NSObject, ObservableObject {
         availableModels[index].isDownloading = true
         availableModels[index].downloadProgress = 0
 
-        // Use default session with background task protection
-        // Background URLSession is unreliable on simulator and has complex reconnection requirements
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForResource = 1800 // 30 minutes max
-        config.allowsExpensiveNetworkAccess = true
-        config.allowsConstrainedNetworkAccess = true
-        let session = URLSession(configuration: config, delegate: self, delegateQueue: .main)
-
         var request = URLRequest(url: url)
         request.allowsExpensiveNetworkAccess = true
 
-        let downloadTask = session.downloadTask(with: request)
+        let downloadTask = backgroundDownloadSession.downloadTask(with: request)
         downloadTask.taskDescription = model.id
 
         downloadTasks[model.id] = downloadTask
-        downloadSessions[model.id] = session
-
-        // Request extended background execution time so downloads survive app backgrounding
-        beginBackgroundDownload(modelId: model.id)
-
         downloadTask.resume()
+    }
+
+    private func reconnectBackgroundDownloads() {
+        backgroundDownloadSession.getAllTasks { [weak self] tasks in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                for case let task as URLSessionDownloadTask in tasks {
+                    guard let modelID = task.taskDescription,
+                          let index = self.availableModels.firstIndex(where: { $0.id == modelID }) else { continue }
+                    self.downloadTasks[modelID] = task
+                    self.availableModels[index].isDownloading = true
+                    if task.countOfBytesExpectedToReceive > 0 {
+                        self.availableModels[index].downloadProgress = Double(task.countOfBytesReceived)
+                            / Double(task.countOfBytesExpectedToReceive)
+                    }
+                }
+            }
+        }
     }
 
     static func directorySize(_ url: URL) -> Int64 {
@@ -362,8 +444,6 @@ class ModelManager: NSObject, ObservableObject {
     func cancelDownload(_ model: AIModel) {
         downloadTasks[model.id]?.cancel()
         downloadTasks.removeValue(forKey: model.id)
-        downloadSessions[model.id]?.invalidateAndCancel()
-        downloadSessions.removeValue(forKey: model.id)
         swiftletCancelFlags[model.id]?.set()
         mlxDownloadTasks[model.id]?.cancel()
         mlxDownloadTasks.removeValue(forKey: model.id)
@@ -426,47 +506,60 @@ class ModelManager: NSObject, ObservableObject {
 
     // MARK: - Import
 
-    func importModel(from url: URL, name: String, displayName: String) {
-        guard url.startAccessingSecurityScopedResource() else { return }
+    @MainActor
+    func importModel(from url: URL, name: String, displayName: String) async throws {
+        guard url.startAccessingSecurityScopedResource() else {
+            throw ModelImportError.accessDenied
+        }
         defer { url.stopAccessingSecurityScopedResource() }
 
         let modelId = name.lowercased().replacingOccurrences(of: " ", with: "-")
         let destination = Self.modelsDirectory.appendingPathComponent("\(modelId).gguf")
+        let staged = Self.modelsDirectory.appendingPathComponent(".importing-\(UUID().uuidString).gguf")
 
-        do {
+        let fileSize = try await Task.detached(priority: .userInitiated) {
+            defer { try? FileManager.default.removeItem(at: staged) }
+            try FileManager.default.copyItem(at: url, to: staged)
+            guard Self.isValidGGUF(at: staged) else { throw ModelImportError.invalidGGUF }
+            let values = try staged.resourceValues(forKeys: [.fileSizeKey])
+            let size = Int64(values.fileSize ?? 0)
             if FileManager.default.fileExists(atPath: destination.path) {
-                try FileManager.default.removeItem(at: destination)
+                _ = try FileManager.default.replaceItemAt(destination, withItemAt: staged)
+            } else {
+                try FileManager.default.moveItem(at: staged, to: destination)
             }
-            try FileManager.default.copyItem(at: url, to: destination)
+            return size
+        }.value
 
-            let fileSize = (try? FileManager.default.attributesOfItem(atPath: destination.path)[.size] as? Int64) ?? 0
+        var newModel = AIModel(
+            id: modelId,
+            name: name,
+            displayName: displayName,
+            description: "Imported GGUF model",
+            modelUrl: "",
+            modelSize: fileSize,
+            taskIds: [BuiltInTaskID.llmChat.rawValue],
+            huggingFaceUrl: nil,
+            parameters: AIModel.ModelParameters(
+                temperature: 0.7, topK: 40, topP: 0.95, maxTokens: 1024, randomSeed: 42
+            ),
+            chatTemplate: .chatml
+        )
+        newModel.isDownloaded = true
+        newModel.downloadProgress = 1.0
 
-            var newModel = AIModel(
-                id: modelId,
-                name: name,
-                displayName: displayName,
-                description: "Imported model",
-                modelUrl: "",
-                modelSize: fileSize,
-                taskIds: [
-                    BuiltInTaskID.llmChat.rawValue,
-                ],
-                huggingFaceUrl: nil,
-                parameters: AIModel.ModelParameters(
-                    temperature: 0.7, topK: 40, topP: 0.95, maxTokens: 1024, randomSeed: 42
-                ),
-                chatTemplate: .chatml
-            )
-            newModel.isDownloaded = true
-            newModel.downloadProgress = 1.0
-
+        if let index = availableModels.firstIndex(where: { $0.id == modelId }) {
+            availableModels[index] = newModel
+        } else {
             availableModels.append(newModel)
-            downloadedModels.append(newModel)
-            updateTaskModels()
-            saveCustomModels()
-        } catch {
-            print("Error importing model: \(error)")
         }
+        if let index = downloadedModels.firstIndex(where: { $0.id == modelId }) {
+            downloadedModels[index] = newModel
+        } else {
+            downloadedModels.append(newModel)
+        }
+        updateTaskModels()
+        saveCustomModels()
     }
 
     /// Registers a model discovered from a pasted Hugging Face repository and
@@ -530,21 +623,6 @@ class ModelManager: NSObject, ObservableObject {
         }
     }
 
-    // Request extended background time so downloads survive when user switches apps
-    private var backgroundTaskId: UIBackgroundTaskIdentifier = .invalid
-
-    private func beginBackgroundDownload(modelId: String) {
-        backgroundTaskId = UIApplication.shared.beginBackgroundTask(withName: "model-download-\(modelId)") { [weak self] in
-            self?.endBackgroundDownload()
-        }
-    }
-
-    private func endBackgroundDownload() {
-        if backgroundTaskId != .invalid {
-            UIApplication.shared.endBackgroundTask(backgroundTaskId)
-            backgroundTaskId = .invalid
-        }
-    }
 }
 
 // MARK: - URLSessionDownloadDelegate
@@ -563,8 +641,6 @@ extension ModelManager: URLSessionDownloadDelegate {
             downloadError = "Download corrupted (invalid GGUF file). Please try again."
             try? FileManager.default.removeItem(at: location)
             downloadTasks.removeValue(forKey: modelId)
-            downloadSessions.removeValue(forKey: modelId)
-            endBackgroundDownload()
             return
         }
 
@@ -577,7 +653,11 @@ extension ModelManager: URLSessionDownloadDelegate {
             availableModels[index].isDownloading = false
             availableModels[index].isDownloaded = true
             availableModels[index].downloadProgress = 1.0
-            downloadedModels.append(availableModels[index])
+            if let downloadedIndex = downloadedModels.firstIndex(where: { $0.id == modelId }) {
+                downloadedModels[downloadedIndex] = availableModels[index]
+            } else {
+                downloadedModels.append(availableModels[index])
+            }
             updateTaskModels()
             saveCustomModels()
         } catch {
@@ -588,8 +668,6 @@ extension ModelManager: URLSessionDownloadDelegate {
         }
 
         downloadTasks.removeValue(forKey: modelId)
-        downloadSessions.removeValue(forKey: modelId)
-        endBackgroundDownload()
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
@@ -632,8 +710,10 @@ extension ModelManager: URLSessionDownloadDelegate {
         }
 
         downloadTasks.removeValue(forKey: modelId)
-        downloadSessions.removeValue(forKey: modelId)
-        endBackgroundDownload()
+    }
+
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        BackgroundDownloadBridge.finishEvents()
     }
 
     /// Validate GGUF magic bytes (0x47475546 = "GGUF")

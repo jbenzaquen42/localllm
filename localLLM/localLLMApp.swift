@@ -110,6 +110,16 @@ struct LLMGalleryHost: View {
 
 // MARK: - App Delegate for Quick Actions
 
+enum BackgroundDownloadBridge {
+    static var completionHandler: (() -> Void)?
+
+    static func finishEvents() {
+        let completion = completionHandler
+        completionHandler = nil
+        completion?()
+    }
+}
+
 class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         application.shortcutItems = [
@@ -130,6 +140,14 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         } else {
             completionHandler(false)
         }
+    }
+
+    func application(
+        _ application: UIApplication,
+        handleEventsForBackgroundURLSession identifier: String,
+        completionHandler: @escaping () -> Void
+    ) {
+        BackgroundDownloadBridge.completionHandler = completionHandler
     }
 }
 

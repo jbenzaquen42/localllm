@@ -70,6 +70,25 @@ jobs:
             exit 1
           fi
 
+          # SideStore reads requested entitlements from the app's existing
+          # Mach-O signature before re-signing it with the user's profile.
+          # Preserve HealthKit in this otherwise distribution-unsigned build.
+          find "$APP_PATH/Frameworks" -type d -name '*.framework' -prune -print0 2>/dev/null \
+            | while IFS= read -r -d '' framework; do
+                codesign --force --sign - --timestamp=none "$framework"
+              done
+          find "$APP_PATH/Frameworks" -type f -name '*.dylib' -print0 2>/dev/null \
+            | while IFS= read -r -d '' dylib; do
+                codesign --force --sign - --timestamp=none "$dylib"
+              done
+          codesign --force --sign - --timestamp=none \
+            --entitlements "$GITHUB_WORKSPACE/localLLM/localLLM.entitlements" \
+            "$APP_PATH"
+
+          codesign --verify --deep --strict "$APP_PATH"
+          codesign -d --entitlements :- "$APP_PATH" 2>/dev/null > "$RUNNER_TEMP/source-entitlements.plist"
+          /usr/libexec/PlistBuddy -c 'Print :com.apple.developer.healthkit' "$RUNNER_TEMP/source-entitlements.plist"
+
           mkdir -p "$RUNNER_TEMP/ipa/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/ipa/Payload/"
 
@@ -109,7 +128,7 @@ jobs:
             '{
               version: $version,
               date: $date,
-              localizedDescription: "Latest Priv AI build with local GGUF, MLX, and Swiftlet inference improvements.",
+              localizedDescription: "Adds screen-lock GGUF downloads, exact Hugging Face file selection, experimental large-GGUF loading, clearer HealthKit signing diagnostics, and model storage controls.",
               downloadURL: $downloadURL,
               size: $size,
               minOSVersion: "17.0"

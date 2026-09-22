@@ -167,10 +167,16 @@ struct HuggingFaceRepositorySheet: View {
     @State private var selectedOptionID: String?
     @State private var isInspecting = false
     @State private var errorMessage: String?
+    @State private var installingModelID: String?
 
     private var selectedOption: HuggingFaceDownloadOption? {
         guard let selectedOptionID else { return nil }
         return inspection?.options.first { $0.id == selectedOptionID }
+    }
+
+    private var installingModel: AIModel? {
+        guard let installingModelID else { return nil }
+        return modelManager.availableModels.first { $0.id == installingModelID }
     }
 
     var body: some View {
@@ -200,7 +206,79 @@ struct HuggingFaceRepositorySheet: View {
                         .disabled(isInspecting || repositoryURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
 
-                    if let inspection {
+                    if let installingModel {
+                        VStack(alignment: .leading, spacing: 16) {
+                            HStack(spacing: 12) {
+                                Image(systemName: installingModel.isDownloaded ? "checkmark.circle.fill" : "arrow.down.circle.fill")
+                                    .font(.system(size: 34))
+                                    .foregroundStyle(installingModel.isDownloaded ? .green : .blue)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(
+                                        installingModel.isDownloaded
+                                            ? "Model installed"
+                                            : (installingModel.isDownloading ? "Download started" : "Download paused")
+                                    )
+                                        .font(.title3.bold())
+                                    Text(installingModel.displayName)
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+
+                            if !installingModel.isDownloaded {
+                                ProgressView(value: installingModel.downloadProgress)
+                                    .tint(.blue)
+                                HStack {
+                                    Text("\(Int(installingModel.downloadProgress * 100))%")
+                                    Spacer()
+                                    Text(installingModel.formattedSize)
+                                }
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                            }
+
+                            if let downloadError = modelManager.downloadError {
+                                Label(downloadError, systemImage: "exclamationmark.triangle.fill")
+                                    .font(.footnote)
+                                    .foregroundStyle(.red)
+                            }
+
+                            Label(
+                                installingModel.engineFormat == .gguf
+                                    ? "This GGUF transfer continues while the screen is locked. Do not force-quit the app."
+                                    : "Keep Priv AI open while this format downloads; interrupted installs can resume.",
+                                systemImage: "lock.iphone"
+                            )
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+
+                            if installingModel.isExperimentalLargeGGUF {
+                                Label(
+                                    "Experimental memory-mapped mode. This is not a Swiftlet QPack, so the 8 tok/s Swiftlet result is not a performance guarantee.",
+                                    systemImage: "flask.fill"
+                                )
+                                .font(.footnote)
+                                .foregroundStyle(.orange)
+                            }
+
+                            HStack {
+                                if !installingModel.isDownloaded && !installingModel.isDownloading {
+                                    Button("Try Again") {
+                                        modelManager.downloadModel(installingModel)
+                                    }
+                                    .buttonStyle(.bordered)
+                                }
+                                Button(installingModel.isDownloaded ? "Done" : "Continue in Models") {
+                                    dismiss()
+                                }
+                                .buttonStyle(.borderedProminent)
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                        .padding(16)
+                        .background(Color(uiColor: .secondarySystemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                    } else if let inspection {
                         VStack(alignment: .leading, spacing: 5) {
                             Text(inspection.displayName)
                                 .font(.title3.bold())
@@ -268,7 +346,7 @@ struct HuggingFaceRepositorySheet: View {
                             guard let option = selectedOption,
                                   let model = huggingFaceService.model(from: option, repository: inspection) else { return }
                             modelManager.addAndDownloadRemoteModel(model)
-                            dismiss()
+                            installingModelID = model.id
                         } label: {
                             Label("Add and Download", systemImage: "arrow.down.circle.fill")
                                 .frame(maxWidth: .infinity)
@@ -305,7 +383,9 @@ struct HuggingFaceRepositorySheet: View {
             do {
                 let result = try await huggingFaceService.inspectRepository(repositoryURL)
                 inspection = result
-                selectedOptionID = result.options.first(where: { $0.isRecommended })?.id ?? result.options.first?.id
+                selectedOptionID = result.requestedFilePath.flatMap { requestedPath in
+                    result.options.first { $0.filePath == requestedPath }?.id
+                } ?? result.options.first(where: { $0.isRecommended })?.id ?? result.options.first?.id
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -600,11 +680,16 @@ struct CompatibilityInfoPopover: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 CompatibilityInfoRow(label: "Model size", value: "\(report.modelSizeMB) MB")
-                CompatibilityInfoRow(label: "Inference overhead", value: "+\(report.inferenceOverheadMB) MB")
-                Divider()
-                CompatibilityInfoRow(label: "Total needed", value: "\(report.requiredMB) MB", bold: true)
-                CompatibilityInfoRow(label: "iOS gives this app", value: "\(report.deviceBudgetMB) MB")
-                CompatibilityInfoRow(label: "Usage", value: "\(report.percentOfBudget)% of budget", bold: true)
+                if report.isEstimateUnavailable {
+                    CompatibilityInfoRow(label: "Load mode", value: "Memory mapped")
+                    CompatibilityInfoRow(label: "Working memory", value: "Measure on device", bold: true)
+                } else {
+                    CompatibilityInfoRow(label: "Inference overhead", value: "+\(report.inferenceOverheadMB) MB")
+                    Divider()
+                    CompatibilityInfoRow(label: "Total needed", value: "\(report.requiredMB) MB", bold: true)
+                    CompatibilityInfoRow(label: "iOS gives this app", value: "\(report.deviceBudgetMB) MB")
+                    CompatibilityInfoRow(label: "Usage", value: "\(report.percentOfBudget)% of budget", bold: true)
+                }
             }
             .font(.system(size: 13))
 

@@ -22,6 +22,7 @@ struct SettingsView: View {
     @State private var showClearAlert = false
     @State private var showRecoveryAlert = false
     @State private var showWipeJournalAlert = false
+    @State private var storageError: String?
 
     var body: some View {
             List {
@@ -394,6 +395,38 @@ struct SettingsView: View {
 
                 // Storage Section
                 Section {
+                    Picker(
+                        "Model File Location",
+                        selection: Binding(
+                            get: { modelManager.storageLocation },
+                            set: { newLocation in
+                                storageError = nil
+                                Task {
+                                    await inferenceManager.unloadModel()
+                                    SwiftletEngine.shared.unload()
+                                    MLXEngine.shared.unload()
+                                    if !modelManager.changeStorageLocation(to: newLocation) {
+                                        storageError = modelManager.downloadError
+                                    }
+                                }
+                            }
+                        )
+                    ) {
+                        ForEach(ModelStorageLocation.allCases) { location in
+                            Text(location.title).tag(location)
+                        }
+                    }
+
+                    Text(modelManager.storageLocation.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if let storageError {
+                        Label(storageError, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+
                     HStack {
                         Label {
                             Text("Models Cache")
@@ -446,6 +479,9 @@ struct SettingsView: View {
                     Text("STORAGE")
                         .font(.system(size: 11, weight: .bold))
                         .tracking(1.2)
+                } footer: {
+                    Text("Changing location safely moves GGUF and Swiftlet files. MLX checkpoints remain in the managed Hugging Face cache. Model folders are excluded from device backups because they can be downloaded again.")
+                        .font(.caption2)
                 }
 
                 // Recovery

@@ -90,7 +90,7 @@ struct HealthConnectView: View {
                     Task {
                         do {
                             try await healthManager.requestAuthorization()
-                        } catch { connectionError = "Failed: \(error.localizedDescription)" }
+                        } catch { connectionError = error.localizedDescription }
                     }
                 } label: {
                     HStack {

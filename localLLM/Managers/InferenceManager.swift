@@ -104,6 +104,7 @@ class InferenceManager: ObservableObject {
         let requiredMB: Int
         let deviceBudgetMB: Int
         let percentOfBudget: Int          // 0...100+
+        var isEstimateUnavailable: Bool = false
     }
 
     /// Compute compatibility for a given model on this device.
@@ -125,6 +126,20 @@ class InferenceManager: ObservableObject {
                 requiredMB: requiredMB,
                 deviceBudgetMB: deviceMemoryBudgetMB,
                 percentOfBudget: deviceMemoryBudgetMB > 0 ? requiredMB * 100 / deviceMemoryBudgetMB : 0
+            )
+        }
+
+        if model.isExperimentalLargeGGUF {
+            return CompatibilityReport(
+                status: .yellow,
+                label: "Experimental memory-mapped GGUF",
+                reason: "The \(modelSizeMB) MB file is mapped from storage instead of fully copied into RAM. Its real working set and Metal performance must be measured on this iPhone; iOS may still terminate it under pressure, and Swiftlet results do not carry over.",
+                modelSizeMB: modelSizeMB,
+                inferenceOverheadMB: 0,
+                requiredMB: 0,
+                deviceBudgetMB: deviceMemoryBudgetMB,
+                percentOfBudget: 0,
+                isEstimateUnavailable: true
             )
         }
 
@@ -373,7 +388,7 @@ class InferenceManager: ObservableObject {
         let inferenceOverheadMB = max(200, modelSizeMB / 2) // floor of 200MB for tiny models, scales up with model size
         let requiredMB = modelSizeMB + inferenceOverheadMB
 
-        if availableMB > 0 {
+        if availableMB > 0 && !model.isExperimentalLargeGGUF {
             // Hard warning: model very likely won't fit. Offer "Try Anyway" but warn clearly.
             if !forceLoad && availableMB < requiredMB {
                 blockedLoad = ModelLoadConfirmation(
@@ -398,7 +413,11 @@ class InferenceManager: ObservableObject {
 
         // Load with timeout
         do {
-            try await loadModelWithTimeout(at: path, contextSize: ctxSize, timeout: 30)
+            try await loadModelWithTimeout(
+                at: path,
+                contextSize: ctxSize,
+                timeout: model.isExperimentalLargeGGUF ? 180 : 30
+            )
             currentModelId = model.id
             lastLoadedModel = model
             isModelLoaded = true

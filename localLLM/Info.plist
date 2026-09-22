@@ -18,13 +18,5 @@
 	<string>Priv AI needs access to your photos to analyze images with AI. All processing happens on your device.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Priv AI connects to Ollama on your local network for AI inference with larger models.</string>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>processing</string>
-	</array>
-	<key>BGTaskSchedulerPermittedIdentifiers</key>
-	<array>
-		<string>com.monishsoundarraj.PrivAI.model-download</string>
-	</array>
 </dict>
 </plist>

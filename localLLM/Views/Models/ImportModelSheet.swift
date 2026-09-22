@@ -14,6 +14,7 @@ struct ImportModelSheet: View {
     @State private var selectedFileURL: URL?
     @State private var fileSize: String = ""
     @State private var isImporting = false
+    @State private var importError: String?
 
     var body: some View {
         NavigationStack {
@@ -55,6 +56,14 @@ struct ImportModelSheet: View {
                     Text("Model File")
                 } footer: {
                     Text("Select a .gguf model file from your device or Files app")
+                }
+
+                if let importError {
+                    Section {
+                        Label(importError, systemImage: "exclamationmark.triangle.fill")
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
                 }
 
                 if selectedFileURL != nil {
@@ -149,9 +158,17 @@ struct ImportModelSheet: View {
     private func importModel() {
         guard let url = selectedFileURL else { return }
         isImporting = true
+        importError = nil
         let name = displayName.lowercased().replacingOccurrences(of: " ", with: "-")
-        modelManager.importModel(from: url, name: name, displayName: displayName)
-        isImporting = false
-        dismiss()
+        Task {
+            do {
+                try await modelManager.importModel(from: url, name: name, displayName: displayName)
+                isImporting = false
+                dismiss()
+            } catch {
+                importError = error.localizedDescription
+                isImporting = false
+            }
+        }
     }
 }

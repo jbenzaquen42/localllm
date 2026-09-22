@@ -192,7 +192,7 @@ struct ChatView: View {
                                     isGenerating: $isGenerating,
                                     selectedImage: $selectedImage,
                                     activeContext: $activeContext,
-                                    chatOnlyModel: model.engineFormat != .gguf,
+                                    chatOnlyModel: model.isChatOnly,
                                     isFocused: $isInputFocused,
                                     onPhotoPick: { showPhotoPicker = true },
                                     onDocumentPick: { isImporting = true },
@@ -372,7 +372,7 @@ struct ChatView: View {
                                 isGenerating: $isGenerating,
                                 selectedImage: $selectedImage,
                                 activeContext: $activeContext,
-                                chatOnlyModel: model.engineFormat != .gguf,
+                                chatOnlyModel: model.isChatOnly,
                                 isFocused: $isInputFocused,
                                 onPhotoPick: { showPhotoPicker = true },
                                 onDocumentPick: { isImporting = true },
@@ -445,7 +445,7 @@ struct ChatView: View {
         .navigationDestination(isPresented: $navigateToExperimental) { ExperimentalModelsView() }
         .onChange(of: model.id) { _, _ in
             // The experimental model is chat-only: force the General context.
-            if model.engineFormat != .gguf { activeContext = .general }
+            if model.isChatOnly { activeContext = .general }
         }
         .onAppear {
             if let ctx = initialContext {
@@ -499,7 +499,10 @@ struct ChatView: View {
             // Use the first downloaded model if current selection isn't downloaded
             let modelToLoad = FileManager.default.fileExists(atPath: model.localPath.path) ? model : downloaded
             model = modelToLoad
-            await inferenceManager.loadModel(modelToLoad)
+            await inferenceManager.loadModel(
+                modelToLoad,
+                forceLoad: modelToLoad.isExperimentalLargeGGUF
+            )
             if let error = inferenceManager.loadError { modelLoadError = error }
         } else {
             // No models downloaded at all

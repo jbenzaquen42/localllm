@@ -32,6 +32,10 @@ struct HuggingFaceRepositoryInspection {
     let repoID: String
     let displayName: String
     let options: [HuggingFaceDownloadOption]
+    let requestedRevision: String
+    /// File selected by a pasted `/blob/<revision>/<path>` or
+    /// `/resolve/<revision>/<path>` URL. Nil for a repository-page URL.
+    let requestedFilePath: String?
     let hasRawMLXCheckpoint: Bool
     let hasShardedGGUF: Bool
 
@@ -82,8 +86,14 @@ class HuggingFaceService: ObservableObject {
         let tags: [String]?
     }
 
-    /// Accepts either `owner/repository` or a normal Hugging Face model-page URL.
-    static func repositoryID(from input: String) -> String? {
+    struct ParsedModelLocation {
+        let repositoryID: String
+        let revision: String
+        let filePath: String?
+    }
+
+    /// Accepts `owner/repository`, a model page, or a Hugging Face blob/resolve URL.
+    static func modelLocation(from input: String) -> ParsedModelLocation? {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
@@ -93,19 +103,41 @@ class HuggingFaceService: ObservableObject {
            host == "huggingface.co" || host == "www.huggingface.co" {
             let components = url.pathComponents.filter { $0 != "/" }
             guard components.count >= 2 else { return nil }
-            return "\(components[0])/\(components[1])"
+            let repoID = "\(components[0])/\(components[1])"
+            if components.count >= 5 && (components[2] == "blob" || components[2] == "resolve") {
+                let filePath = components.dropFirst(4).joined(separator: "/").removingPercentEncoding
+                guard let filePath, !filePath.isEmpty else { return nil }
+                return ParsedModelLocation(
+                    repositoryID: repoID,
+                    revision: components[3],
+                    filePath: filePath
+                )
+            }
+            return ParsedModelLocation(repositoryID: repoID, revision: "main", filePath: nil)
         }
 
         let components = trimmed.split(separator: "/", omittingEmptySubsequences: true)
         guard components.count == 2 else { return nil }
-        return "\(components[0])/\(components[1])"
+        return ParsedModelLocation(
+            repositoryID: "\(components[0])/\(components[1])",
+            revision: "main",
+            filePath: nil
+        )
+    }
+
+    static func repositoryID(from input: String) -> String? {
+        modelLocation(from: input)?.repositoryID
     }
 
     /// Inspects one repository and returns only options the current app can run.
     /// MLX checkpoints are represented as a single repository option because
     /// MLX Swift LM downloads the config, tokenizer, and weight shards together.
     func inspectRepository(_ input: String) async throws -> HuggingFaceRepositoryInspection {
-        guard let repoID = Self.repositoryID(from: input),
+        guard let requestedLocation = Self.modelLocation(from: input) else {
+            throw HuggingFaceRepositoryError.invalidRepository
+        }
+        let repoID = requestedLocation.repositoryID
+        guard
               let escapedRepo = repoID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
               let url = URL(string: "https://huggingface.co/api/models/\(escapedRepo)?blobs=true") else {
             throw HuggingFaceRepositoryError.invalidRepository
@@ -205,6 +237,8 @@ class HuggingFaceService: ObservableObject {
             repoID: resolvedRepoID,
             displayName: resolvedRepoID.split(separator: "/").last.map(String.init) ?? resolvedRepoID,
             options: options,
+            requestedRevision: requestedLocation.revision,
+            requestedFilePath: requestedLocation.filePath,
             hasRawMLXCheckpoint: hasRawMLX,
             hasShardedGGUF: allGGUF.count != singleFileGGUF.count
         )
@@ -224,13 +258,20 @@ class HuggingFaceService: ObservableObject {
                   let escapedPath = filePath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
                 return nil
             }
-            modelURL = "https://huggingface.co/\(repository.repoID)/resolve/main/\(escapedPath)"
+            let escapedRevision = repository.requestedRevision
+                .addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? "main"
+            modelURL = "https://huggingface.co/\(repository.repoID)/resolve/\(escapedRevision)/\(escapedPath)"
             format = .gguf
-            tasks = [
-                BuiltInTaskID.llmChat.rawValue,
-                BuiltInTaskID.llmFinance.rawValue,
-                BuiltInTaskID.llmHealth.rawValue,
-            ]
+            // Very large memory-mapped GGUFs are an explicit chat-only
+            // experiment. They are not Swiftlet QPacks and do not inherit its
+            // expert-streaming guarantees.
+            tasks = option.size >= 8_000_000_000
+                ? [BuiltInTaskID.llmChat.rawValue]
+                : [
+                    BuiltInTaskID.llmChat.rawValue,
+                    BuiltInTaskID.llmFinance.rawValue,
+                    BuiltInTaskID.llmHealth.rawValue,
+                ]
         case .swiftlet:
             modelURL = repository.modelPageURL
             format = .swiftlet
@@ -259,7 +300,10 @@ class HuggingFaceService: ObservableObject {
             displayName: displayName,
             description: {
                 switch option.kind {
-                case .gguf: return "\(option.title) GGUF from \(repository.repoID)."
+                case .gguf:
+                    return option.size >= 8_000_000_000
+                        ? "Experimental memory-mapped GGUF from \(repository.repoID). Chat only; speed and stability depend on the device and are not equivalent to Swiftlet QPack."
+                        : "\(option.title) GGUF from \(repository.repoID)."
                 case .swiftlet: return "Swiftlet QPack from \(repository.repoID). Experts stream from storage."
                 case .mlx: return "Native MLX model from \(repository.repoID). Runs with MLX Swift LM."
                 }

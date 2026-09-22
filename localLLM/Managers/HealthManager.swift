@@ -25,6 +25,23 @@ struct DailyMetric: Identifiable {
     }
 }
 
+enum HealthAccessError: LocalizedError {
+    case unavailable
+    case missingEntitlement
+    case authorizationDenied
+
+    var errorDescription: String? {
+        switch self {
+        case .unavailable:
+            return "Apple Health is not available on this device."
+        case .missingEntitlement:
+            return "This install was signed without HealthKit access. Update Priv AI from the latest SideStore source, then refresh its signing profile and reinstall."
+        case .authorizationDenied:
+            return "Apple Health access was denied. Enable Priv AI in Settings > Health > Data Access & Devices. If no permission sheet appeared, refresh the SideStore signing profile and reinstall."
+        }
+    }
+}
+
 @MainActor
 class HealthManager: ObservableObject {
     @Published var isAuthorized: Bool {
@@ -114,7 +131,7 @@ class HealthManager: ObservableObject {
     }
 
     func requestAuthorization() async throws {
-        guard isAvailable else { return }
+        guard isAvailable else { throw HealthAccessError.unavailable }
 
         let readTypes: Set<HKObjectType> = [
             HKQuantityType(.stepCount),
@@ -129,9 +146,21 @@ class HealthManager: ObservableObject {
             HKCategoryType(.sleepAnalysis)
         ]
 
-        try await healthStore.requestAuthorization(toShare: [], read: readTypes)
-        isAuthorized = true
-        await fetchAllData()
+        do {
+            try await healthStore.requestAuthorization(toShare: [], read: readTypes)
+            isAuthorized = true
+            await fetchAllData()
+        } catch {
+            isAuthorized = false
+            let message = error.localizedDescription.lowercased()
+            if message.contains("entitlement") || message.contains("com.apple.developer.healthkit") {
+                throw HealthAccessError.missingEntitlement
+            }
+            if let healthError = error as? HKError, healthError.code == .errorAuthorizationDenied {
+                throw HealthAccessError.authorizationDenied
+            }
+            throw error
+        }
     }
 
     func fetchAllData() async {
@@ -296,7 +325,7 @@ class HealthManager: ObservableObject {
     }
 
     func requestAuthorization() async throws {
-        // HealthKit not available
+        throw HealthAccessError.unavailable
     }
 
     func fetchAllData() async {}
