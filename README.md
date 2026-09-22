@@ -42,6 +42,8 @@ To add another model, open **Models**, tap **+**, then **Add Hugging Face Model*
 
 The experimental 35B runs on Swiftlet, a Swift + Metal engine that keeps a small dense core resident and streams the model's Mixture-of-Experts weights from storage per token. The model itself comes from [Hugging Face](https://huggingface.co/Leonickson/Qwen3.6-35B-A3B-qpack) as a resumable in-app download of about 18 GB.
 
+Maintainers can also build the compatible Heretic 35B QPack with the manual, TrueNAS-backed GitHub Actions workflow documented in [docs/HERETIC_QPACK_ACTIONS.md](docs/HERETIC_QPACK_ACTIONS.md).
+
 For health and finance features, the app uses Apple's on-device frameworks (HealthKit, Vision OCR, PDFKit) to gather data, then feeds it as context to the LLM for analysis.
 
 ## Building from source

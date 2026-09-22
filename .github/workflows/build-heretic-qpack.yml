@@ -1,0 +1,290 @@
+name: Build Heretic QPack
+
+on:
+  workflow_dispatch:
+    inputs:
+      hf_repo:
+        description: Hugging Face destination repository (owner/name)
+        required: true
+        default: jbenzaquen42/Qwen3.6-35B-A3B-Uncensored-Heretic-QPack
+        type: string
+
+concurrency:
+  group: build-heretic-qpack
+  cancel-in-progress: false
+
+jobs:
+  repack:
+    name: Repack MLX model on TrueNAS and publish to Hugging Face
+    runs-on: macos-26
+    timeout-minutes: 360
+    permissions:
+      contents: read
+
+    env:
+      SOURCE_REPO: froggeric/Qwen3.6-35B-A3B-Uncensored-Heretic-MLX-4bit
+      SWIFTLET_COMMIT: 909c04213c9deb369dac0679d0872512cf3ab32e
+      TRUENAS_HOST: 100.93.46.67
+      TRUENAS_SHARE: ssd-pool
+      QPACK_RELATIVE_PATH: qpack-builds/qwen3.6-35b-heretic.qpack
+      HF_XET_HIGH_PERFORMANCE: "1"
+
+    steps:
+      - name: Validate required secrets and input
+        env:
+          HF_DEST_REPO: ${{ inputs.hf_repo }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SMB_USERNAME: ${{ secrets.TRUENAS_SMB_USERNAME }}
+          SMB_PASSWORD: ${{ secrets.TRUENAS_SMB_PASSWORD }}
+          TS_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          TS_CLIENT_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+        run: |
+          set -euo pipefail
+          for name in HF_TOKEN SMB_USERNAME SMB_PASSWORD TS_CLIENT_ID TS_CLIENT_SECRET; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Required repository secret $name is not configured."
+              exit 1
+            fi
+          done
+
+          if ! [[ "$HF_DEST_REPO" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "::error::hf_repo must use the owner/name format."
+            exit 1
+          fi
+
+      - name: Checkout this repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Checkout the Priv AI Swiftlet revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: leonickson1/Swiftlet
+          ref: ${{ env.SWIFTLET_COMMIT }}
+          path: Swiftlet
+
+      - name: Select Xcode 26.2
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
+          xcodebuild -version
+          uname -m
+
+      - name: Connect the runner to Tailscale
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4
+        env:
+          GOWORK: "off"
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          ping: ${{ env.TRUENAS_HOST }}
+          use-cache: "false"
+
+      - name: Mount the TrueNAS build share
+        id: storage
+        env:
+          SMB_USERNAME: ${{ secrets.TRUENAS_SMB_USERNAME }}
+          SMB_PASSWORD: ${{ secrets.TRUENAS_SMB_PASSWORD }}
+        run: |
+          set -euo pipefail
+          MOUNT_POINT="$RUNNER_TEMP/truenas-qpack"
+          mkdir -p "$MOUNT_POINT"
+          export MOUNT_POINT
+
+          python3 - <<'PY'
+          import os
+          import subprocess
+          from urllib.parse import quote
+
+          user = quote(os.environ["SMB_USERNAME"], safe="")
+          password = quote(os.environ["SMB_PASSWORD"], safe="")
+          host = os.environ["TRUENAS_HOST"]
+          share = quote(os.environ["TRUENAS_SHARE"], safe="")
+          mount_point = os.environ["MOUNT_POINT"]
+          remote = f"//{user}:{password}@{host}/{share}"
+          subprocess.run(["mount_smbfs", remote, mount_point], check=True)
+          PY
+
+          QPACK_PATH="$MOUNT_POINT/$QPACK_RELATIVE_PATH"
+          mkdir -p "$(dirname "$QPACK_PATH")"
+
+          AVAILABLE_KB="$(df -Pk "$MOUNT_POINT" | awk 'NR == 2 {print $4}')"
+          REQUIRED_KB=$((30 * 1024 * 1024))
+          if [ "$AVAILABLE_KB" -lt "$REQUIRED_KB" ]; then
+            echo "::error::TrueNAS share needs at least 30 GiB free; only $((AVAILABLE_KB / 1024 / 1024)) GiB is available."
+            exit 1
+          fi
+
+          echo "QPACK_PATH=$QPACK_PATH" >> "$GITHUB_ENV"
+          echo "Mounted TrueNAS with $((AVAILABLE_KB / 1024 / 1024)) GiB free."
+
+      - name: Build Swiftlet repacker
+        working-directory: Swiftlet
+        run: swift build -c release --product swiftlet-repack
+
+      - name: Lock source and converter revisions
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$QPACK_PATH"
+
+          SWIFTLET_SHA="$(git -C Swiftlet rev-parse HEAD)"
+          SOURCE_SHA="$({
+            curl --fail --silent --show-error --location --retry 3 \
+              -H "Authorization: Bearer $HF_TOKEN" \
+              "https://huggingface.co/api/models/$SOURCE_REPO"
+          } | jq -er '.sha')"
+          LOCK_PATH="$QPACK_PATH/source-lock.json"
+
+          if [ -f "$LOCK_PATH" ]; then
+            jq -e \
+              --arg source_repo "$SOURCE_REPO" \
+              --arg source_sha "$SOURCE_SHA" \
+              --arg swiftlet_sha "$SWIFTLET_SHA" \
+              '.source_repo == $source_repo
+               and .source_sha == $source_sha
+               and .swiftlet_sha == $swiftlet_sha' \
+              "$LOCK_PATH" >/dev/null || {
+                echo "::error::Existing QPack work does not match the current source or Swiftlet revision."
+                exit 1
+              }
+          elif find "$QPACK_PATH" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+            echo "::error::Existing QPack work has no source lock; refusing to mix checkpoints."
+            exit 1
+          else
+            jq -n \
+              --arg source_repo "$SOURCE_REPO" \
+              --arg source_sha "$SOURCE_SHA" \
+              --arg swiftlet_sha "$SWIFTLET_SHA" \
+              '{source_repo: $source_repo, source_sha: $source_sha, swiftlet_sha: $swiftlet_sha}' \
+              > "$LOCK_PATH"
+          fi
+
+      - name: Repack Heretic MLX checkpoint into QPack
+        working-directory: Swiftlet
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          .build/release/swiftlet-repack \
+            --from-hf "$SOURCE_REPO" \
+            --output "$QPACK_PATH"
+
+          CURRENT_SOURCE_SHA="$({
+            curl --fail --silent --show-error --location --retry 3 \
+              -H "Authorization: Bearer $HF_TOKEN" \
+              "https://huggingface.co/api/models/$SOURCE_REPO"
+          } | jq -er '.sha')"
+          LOCKED_SOURCE_SHA="$(jq -er '.source_sha' "$QPACK_PATH/source-lock.json")"
+          if [ "$CURRENT_SOURCE_SHA" != "$LOCKED_SOURCE_SHA" ]; then
+            echo "::error::The source repository changed during conversion; refusing to publish mixed weights."
+            exit 1
+          fi
+
+      - name: Validate QPack structure
+        run: |
+          set -euo pipefail
+          test -f "$QPACK_PATH/manifest.json"
+          test -f "$QPACK_PATH/model.safetensors"
+          test -f "$QPACK_PATH/packed_experts/layout.json"
+
+          jq -e '
+            .magic == "QPACK"
+            and .version == 1
+            and .quantBits == 4
+            and .quantGroupSize == 64
+          ' "$QPACK_PATH/manifest.json" >/dev/null
+
+          LAYER_COUNT="$(find "$QPACK_PATH/packed_experts" -type f -name 'layer_*.bin' | wc -l | tr -d ' ')"
+          if [ "$LAYER_COUNT" -ne 40 ]; then
+            echo "::error::Expected 40 expert layer files, found $LAYER_COUNT."
+            exit 1
+          fi
+
+          jq '{magic, version, modelName, quantBits, quantGroupSize}' "$QPACK_PATH/manifest.json"
+          du -sh "$QPACK_PATH"
+
+      - name: Add Hugging Face model card
+        env:
+          HF_DEST_REPO: ${{ inputs.hf_repo }}
+        run: |
+          set -euo pipefail
+          cat > "$QPACK_PATH/README.md" <<EOF
+          ---
+          license: apache-2.0
+          tags:
+          - swiftlet
+          - qpack
+          - qwen3
+          - qwen3.6
+          - mixture-of-experts
+          - heretic
+          base_model: llmfan46/Qwen3.6-35B-A3B-uncensored-heretic
+          ---
+
+          # Qwen3.6 35B-A3B Uncensored Heretic QPack
+
+          Swiftlet QPack generated from
+          [froggeric/Qwen3.6-35B-A3B-Uncensored-Heretic-MLX-4bit](https://huggingface.co/froggeric/Qwen3.6-35B-A3B-Uncensored-Heretic-MLX-4bit)
+          for use with the Swiftlet runtime and Priv AI.
+
+          Destination: `$HF_DEST_REPO`
+
+          This package preserves the source MLX affine 4-bit, group-size-64 text weights.
+          Swiftlet QPack currently excludes the source checkpoint's vision and MTP tensors.
+          EOF
+
+      - name: Install Hugging Face uploader
+        run: |
+          python3 -m venv "$RUNNER_TEMP/hf-venv"
+          "$RUNNER_TEMP/hf-venv/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/hf-venv/bin/pip" install --upgrade huggingface_hub hf_xet
+          echo "$RUNNER_TEMP/hf-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Create repository and upload QPack
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_DEST_REPO: ${{ inputs.hf_repo }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/Library/Python/$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')/bin:$PATH"
+          hf auth whoami
+          hf repos create "$HF_DEST_REPO" --exist-ok
+          hf upload "$HF_DEST_REPO" "$QPACK_PATH" . \
+            --commit-message "Publish Swiftlet Heretic QPack"
+
+      - name: Verify published repository layout
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_DEST_REPO: ${{ inputs.hf_repo }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+
+          repo = os.environ["HF_DEST_REPO"]
+          files = set(HfApi(token=os.environ["HF_TOKEN"]).list_repo_files(repo))
+          required = {
+              "README.md",
+              "manifest.json",
+              "config.json",
+              "model.safetensors",
+              "packed_experts/layout.json",
+              *{f"packed_experts/layer_{index:02d}.bin" for index in range(40)},
+          }
+          missing = sorted(required - files)
+          if missing:
+              raise SystemExit("Published repository is missing: " + ", ".join(missing))
+          print(f"Verified {len(required)} required QPack files in {repo}.")
+          PY
+
+      - name: Unmount TrueNAS
+        if: always()
+        run: |
+          if mount | grep -Fq " on $RUNNER_TEMP/truenas-qpack "; then
+            sync
+            diskutil unmount force "$RUNNER_TEMP/truenas-qpack" \
+              || umount "$RUNNER_TEMP/truenas-qpack" \
+              || true
+          fi
