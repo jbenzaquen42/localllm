@@ -157,7 +157,12 @@ class HuggingFaceService: ObservableObject {
         let resolvedRepoID = repository.modelId ?? repoID
         let tags = Set((repository.tags ?? []).map { $0.lowercased() })
 
-        let allGGUF = repository.siblings.filter { $0.rfilename.lowercased().hasSuffix(".gguf") }
+        // Multimodal projector files are GGUF containers too, but they are not
+        // standalone language models and cannot be loaded by this picker.
+        let allGGUF = repository.siblings.filter {
+            let fileName = $0.rfilename.lowercased()
+            return fileName.hasSuffix(".gguf") && !fileName.contains("mmproj")
+        }
         let splitPattern = try! NSRegularExpression(pattern: #"-\d{5}-of-\d{5}\.gguf$"#, options: [.caseInsensitive])
         let singleFileGGUF = allGGUF.filter { sibling in
             let range = NSRange(sibling.rfilename.startIndex..., in: sibling.rfilename)
@@ -171,7 +176,7 @@ class HuggingFaceService: ObservableObject {
             return (lhs.size ?? 0) < (rhs.size ?? 0)
         }
 
-        var options = sortedGGUF.map { sibling in
+        var options = sortedGGUF.enumerated().map { index, sibling in
             let quant = quantizationLabel(from: sibling.rfilename)
             return HuggingFaceDownloadOption(
                 id: "gguf:\(sibling.rfilename)",
@@ -180,7 +185,10 @@ class HuggingFaceService: ObservableObject {
                 subtitle: sibling.rfilename,
                 filePath: sibling.rfilename,
                 size: sibling.size ?? 0,
-                isRecommended: recommendationRank(for: sibling.rfilename) == 0
+                // The best compatible file actually present in this repository
+                // is recommended. Some repos intentionally publish only Q3 or
+                // a custom mixed-precision filename rather than Q4_K_M.
+                isRecommended: index == 0
             )
         }
 

@@ -24,6 +24,14 @@ struct SettingsView: View {
     @State private var showWipeJournalAlert = false
     @State private var storageError: String?
 
+    private var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown"
+    }
+
+    private var appBuild: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown"
+    }
+
     var body: some View {
             List {
                 // Models Section
@@ -608,7 +616,7 @@ struct SettingsView: View {
                     HStack {
                         Text("Version")
                         Spacer()
-                        Text("1.0.0 Beta")
+                        Text(appVersion)
                             .font(.system(size: 14, design: .monospaced))
                             .foregroundStyle(.secondary)
                     }
@@ -616,7 +624,7 @@ struct SettingsView: View {
                     HStack {
                         Text("Build")
                         Spacer()
-                        Text("1")
+                        Text(appBuild)
                             .font(.system(size: 14, design: .monospaced))
                             .foregroundStyle(.secondary)
                     }
@@ -788,7 +796,7 @@ struct AboutView: View {
                                 .font(.system(size: 24, weight: .bold))
                                 .foregroundStyle(.primary)
 
-                            Text("Version 1.0.0 Beta")
+                            Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown")")
                                 .font(.system(size: 14, design: .monospaced))
                                 .foregroundStyle(.secondary)
                         }

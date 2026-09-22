@@ -27,6 +27,10 @@ class ModelManager: NSObject, ObservableObject {
     @Published var isLoadingAllowlist = false
     @Published var tasks: [AITask] = AITask.sampleTasks
     @Published var downloadError: String?
+    /// A non-error status for the model installer. This is intentionally
+    /// separate from `downloadError`: starting a background URLSession task
+    /// should produce visible confirmation even when there is no error.
+    @Published var downloadStatus: String?
     @Published private(set) var storageLocation: ModelStorageLocation
 
     /// User's preferred default model id, persisted to UserDefaults.
@@ -209,23 +213,28 @@ class ModelManager: NSObject, ObservableObject {
 
     // MARK: - Download
 
-    func downloadModel(_ model: AIModel) {
-        guard let index = availableModels.firstIndex(where: { $0.id == model.id }) else { return }
-        guard !availableModels[index].isDownloading else { return }
+    @discardableResult
+    func downloadModel(_ model: AIModel) -> Bool {
+        guard let index = availableModels.firstIndex(where: { $0.id == model.id }) else {
+            downloadError = "Could not start \(model.displayName): the model was not registered."
+            return false
+        }
+        guard !availableModels[index].isDownloading else {
+            downloadStatus = "Download already running for \(model.displayName)."
+            return true
+        }
+        downloadStatus = nil
+        downloadError = nil
 
         // Streamed (Swiftlet) models install via the streaming installer:
         // bytes route from Hugging Face straight into the on-device container,
         // resumable if interrupted (tap Download again to continue).
         if model.engineFormat == .swiftlet {
-            downloadSwiftletModel(model, at: index)
-            return
+            return downloadSwiftletModel(model, at: index)
         }
         if model.engineFormat == .mlx {
-            downloadMLXModel(model, at: index)
-            return
+            return downloadMLXModel(model, at: index)
         }
-
-        downloadError = nil
 
         // Check available disk space
         let requiredSpace = model.modelSize
@@ -233,12 +242,14 @@ class ModelManager: NSObject, ObservableObject {
             let needed = ByteCountFormatter.string(fromByteCount: requiredSpace + 500_000_000, countStyle: .file)
             let available = ByteCountFormatter.string(fromByteCount: availableSpace, countStyle: .file)
             downloadError = "Not enough storage. Need \(needed), have \(available)."
-            return
+            return false
         }
 
-        guard let url = URL(string: model.modelUrl), !model.modelUrl.isEmpty else {
-            downloadError = "No download URL for this model."
-            return
+        guard !model.modelUrl.isEmpty,
+              let url = URL(string: model.modelUrl),
+              let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http" else {
+            downloadError = "Could not start \(model.displayName): the download URL is invalid."
+            return false
         }
 
         availableModels[index].isDownloading = true
@@ -252,6 +263,8 @@ class ModelManager: NSObject, ObservableObject {
 
         downloadTasks[model.id] = downloadTask
         downloadTask.resume()
+        downloadStatus = "Download started for \(model.displayName) (\(model.formattedSize))."
+        return true
     }
 
     private func reconnectBackgroundDownloads() {
@@ -284,7 +297,8 @@ class ModelManager: NSObject, ObservableObject {
 
     /// Streaming install for directory-container models. Progress comes from
     /// the installer's own byte accounting; re-invoking resumes.
-    private func downloadSwiftletModel(_ model: AIModel, at index: Int) {
+    @discardableResult
+    private func downloadSwiftletModel(_ model: AIModel, at index: Int) -> Bool {
         // HF repos rate-limit anonymous downloads; any other host (e.g. an
         // R2/CDN mirror) is fetched directly at full speed.
         let source: StreamingInstaller.Source
@@ -295,11 +309,11 @@ class ModelManager: NSObject, ObservableObject {
             source = .baseURL(model.modelUrl)
         } else {
             downloadError = "Invalid model source."
-            return
+            return false
         }
         if let availableSpace = availableDiskSpace(), availableSpace < model.modelSize + 2_000_000_000 {
             downloadError = "Not enough free space: this model needs about \(ByteCountFormatter.string(fromByteCount: model.modelSize, countStyle: .file)) plus headroom."
-            return
+            return false
         }
         downloadError = nil
         availableModels[index].isDownloading = true
@@ -337,6 +351,7 @@ class ModelManager: NSObject, ObservableObject {
                     self.downloadedModels.append(model)
                     self.updateTaskModels()
                     self.saveCustomModels()
+                    self.downloadStatus = "Download complete for \(model.displayName)."
                     print("[ModelManager] streamed install complete: \(model.id)")
                 }
             } catch {
@@ -349,11 +364,14 @@ class ModelManager: NSObject, ObservableObject {
                     if case StreamingInstaller.Error.cancelled = error {
                         print("[ModelManager] streamed install cancelled: \(model.id)")
                     } else {
+                        self.downloadStatus = nil
                         self.downloadError = "Download interrupted (\(error.localizedDescription)). Tap Download again to resume; progress is kept."
                     }
                 }
             }
         }
+        downloadStatus = "Download started for \(model.displayName). Keep Priv AI open while this package is prepared."
+        return true
     }
 
     /// Thread-safe cancellation flag polled by the streaming installer.
@@ -371,10 +389,11 @@ class ModelManager: NSObject, ObservableObject {
     }
     private var swiftletCancelFlags: [String: CancelFlag] = [:]
 
-    private func downloadMLXModel(_ model: AIModel, at index: Int) {
+    @discardableResult
+    private func downloadMLXModel(_ model: AIModel, at index: Int) -> Bool {
         if let availableSpace = availableDiskSpace(), availableSpace < model.modelSize + 1_000_000_000 {
             downloadError = "Not enough free space: this MLX model needs about \(model.formattedSize) plus headroom."
-            return
+            return false
         }
 
         downloadError = nil
@@ -400,12 +419,16 @@ class ModelManager: NSObject, ObservableObject {
                 }
                 self.updateTaskModels()
                 self.saveCustomModels()
+                self.downloadStatus = "Download complete for \(model.displayName)."
             } else if !Task.isCancelled {
                 self.availableModels[i].downloadProgress = 0
+                self.downloadStatus = nil
                 self.downloadError = MLXEngine.shared.loadError ?? "MLX model download failed."
             }
         }
         mlxDownloadTasks[model.id] = task
+        downloadStatus = "Download started for \(model.displayName). Keep Priv AI open while this format downloads."
+        return true
     }
 
     private static func isCompleteMLXRepository(at repository: URL) -> Bool {
@@ -564,7 +587,8 @@ class ModelManager: NSObject, ObservableObject {
 
     /// Registers a model discovered from a pasted Hugging Face repository and
     /// starts it through the normal download path.
-    func addAndDownloadRemoteModel(_ model: AIModel) {
+    @discardableResult
+    func addAndDownloadRemoteModel(_ model: AIModel) -> Bool {
         if let index = availableModels.firstIndex(where: { $0.id == model.id }) {
             availableModels[index] = model
         } else {
@@ -572,7 +596,7 @@ class ModelManager: NSObject, ObservableObject {
         }
         updateTaskModels()
         saveCustomModels()
-        downloadModel(model)
+        return downloadModel(model)
     }
 
     // MARK: - Storage
@@ -634,10 +658,22 @@ extension ModelManager: URLSessionDownloadDelegate {
 
         let destination = availableModels[index].localPath
 
+        if let response = downloadTask.response as? HTTPURLResponse,
+           !(200..<300).contains(response.statusCode) {
+            availableModels[index].isDownloading = false
+            availableModels[index].downloadProgress = 0
+            downloadStatus = nil
+            downloadError = "Download failed (HTTP \(response.statusCode)). Check that the Hugging Face file link is public and points to a single GGUF file."
+            try? FileManager.default.removeItem(at: location)
+            downloadTasks.removeValue(forKey: modelId)
+            return
+        }
+
         // Validate GGUF magic bytes before accepting the file
         if !Self.isValidGGUF(at: location) {
             availableModels[index].isDownloading = false
             availableModels[index].downloadProgress = 0
+            downloadStatus = nil
             downloadError = "Download corrupted (invalid GGUF file). Please try again."
             try? FileManager.default.removeItem(at: location)
             downloadTasks.removeValue(forKey: modelId)
@@ -660,10 +696,12 @@ extension ModelManager: URLSessionDownloadDelegate {
             }
             updateTaskModels()
             saveCustomModels()
+            downloadStatus = "Download complete for \(availableModels[index].displayName)."
         } catch {
             availableModels[index].isDownloading = false
             availableModels[index].downloadProgress = 0
             downloadError = "Failed to save model: \(error.localizedDescription)"
+            downloadStatus = nil
             try? FileManager.default.removeItem(at: location) // Clean up temp file
         }
 
@@ -688,6 +726,7 @@ extension ModelManager: URLSessionDownloadDelegate {
                 downloadTask.cancel()
                 availableModels[index].isDownloading = false
                 availableModels[index].downloadProgress = 0
+                downloadStatus = nil
                 downloadError = "Disk space too low. Download cancelled to prevent storage issues."
             }
         }
@@ -697,7 +736,8 @@ extension ModelManager: URLSessionDownloadDelegate {
         guard let modelId = task.taskDescription else { return }
 
         if let error = error as? NSError, error.code != NSURLErrorCancelled {
-            downloadError = "Download failed: \(error.localizedDescription)"
+            downloadError = "Download failed (\(error.domain) \(error.code)): \(error.localizedDescription)"
+            downloadStatus = nil
             if let index = availableModels.firstIndex(where: { $0.id == modelId }) {
                 availableModels[index].isDownloading = false
                 availableModels[index].downloadProgress = 0

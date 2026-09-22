@@ -131,7 +131,7 @@ jobs:
             '{
               version: $version,
               date: $date,
-              localizedDescription: "Adds screen-lock GGUF downloads, exact Hugging Face file selection, experimental large-GGUF loading, clearer HealthKit signing diagnostics, and model storage controls.",
+              localizedDescription: "Makes Hugging Face installs visibly confirm success or show an actionable error, adds HTTP and transfer diagnostics, and displays the real app version and build number.",
               downloadURL: $downloadURL,
               size: $size,
               minOSVersion: "17.0"

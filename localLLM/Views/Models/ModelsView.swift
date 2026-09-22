@@ -168,6 +168,7 @@ struct HuggingFaceRepositorySheet: View {
     @State private var isInspecting = false
     @State private var errorMessage: String?
     @State private var installingModelID: String?
+    @State private var installStatus: String?
 
     private var selectedOption: HuggingFaceDownloadOption? {
         guard let selectedOptionID else { return nil }
@@ -243,6 +244,12 @@ struct HuggingFaceRepositorySheet: View {
                                     .foregroundStyle(.red)
                             }
 
+                            if let installStatus {
+                                Label(installStatus, systemImage: "info.circle.fill")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+
                             Label(
                                 installingModel.engineFormat == .gguf
                                     ? "This GGUF transfer continues while the screen is locked. Do not force-quit the app."
@@ -264,7 +271,13 @@ struct HuggingFaceRepositorySheet: View {
                             HStack {
                                 if !installingModel.isDownloaded && !installingModel.isDownloading {
                                     Button("Try Again") {
-                                        modelManager.downloadModel(installingModel)
+                                        installStatus = "Retrying download…"
+                                        let started = modelManager.downloadModel(installingModel)
+                                        if started {
+                                            installStatus = modelManager.downloadStatus ?? "Download started."
+                                        } else {
+                                            installStatus = modelManager.downloadError ?? "Priv AI could not start this download."
+                                        }
                                     }
                                     .buttonStyle(.bordered)
                                 }
@@ -343,10 +356,22 @@ struct HuggingFaceRepositorySheet: View {
                         }
 
                         Button {
-                            guard let option = selectedOption,
-                                  let model = huggingFaceService.model(from: option, repository: inspection) else { return }
-                            modelManager.addAndDownloadRemoteModel(model)
+                            guard let option = selectedOption else {
+                                errorMessage = "Choose a format or quantization before adding the model."
+                                return
+                            }
+                            guard let model = huggingFaceService.model(from: option, repository: inspection) else {
+                                errorMessage = "Priv AI could not create an installable model from that option. Try another file or quantization."
+                                return
+                            }
                             installingModelID = model.id
+                            installStatus = "Registering model and starting download…"
+                            let started = modelManager.addAndDownloadRemoteModel(model)
+                            if started {
+                                installStatus = modelManager.downloadStatus ?? "Download started."
+                            } else {
+                                installStatus = modelManager.downloadError ?? "Priv AI could not start this download."
+                            }
                         } label: {
                             Label("Add and Download", systemImage: "arrow.down.circle.fill")
                                 .frame(maxWidth: .infinity)
