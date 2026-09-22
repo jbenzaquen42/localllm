@@ -13,6 +13,14 @@
       "tintColor": "2864DC",
       "versions": [
         {
+          "version": "1.1.2",
+          "date": "2026-09-22T18:38:02Z",
+          "localizedDescription": "Makes Hugging Face installs visibly confirm success or show an actionable error, adds HTTP and transfer diagnostics, and displays the real app version and build number.",
+          "downloadURL": "https://github.com/jbenzaquen42/localllm/releases/download/v1.1.2/PrivAI-SideStore.ipa",
+          "size": 20077429,
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.1.1",
           "date": "2026-09-22T04:15:03Z",
           "localizedDescription": "Adds screen-lock GGUF downloads, exact Hugging Face file selection, experimental large-GGUF loading, clearer HealthKit signing diagnostics, and model storage controls.",
