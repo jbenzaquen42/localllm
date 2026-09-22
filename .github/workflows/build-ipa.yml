@@ -26,7 +26,10 @@ jobs:
 
       - name: Checkout Swiftlet sibling dependency
         run: |
-          git clone --depth 1 https://github.com/leonickson1/Swiftlet.git ../swiftlet
+          git init ../swiftlet
+          git -C ../swiftlet remote add origin https://github.com/leonickson1/Swiftlet.git
+          git -C ../swiftlet fetch --depth 1 origin 909c04213c9deb369dac0679d0872512cf3ab32e
+          git -C ../swiftlet checkout --detach FETCH_HEAD
 
       - name: Select Xcode 26.2
         run: |
@@ -170,6 +173,8 @@ jobs:
           fi
 
           jq empty source.json
+          # Keep the v1.1.0 release URL working for users who already added it.
+          cp source.json sidestore.json
           cat source.json
 
       - name: Upload IPA
@@ -179,6 +184,7 @@ jobs:
           path: |
             PrivAI-SideStore.ipa
             source.json
+            sidestore.json
           if-no-files-found: error
           retention-days: 30
 
@@ -191,11 +197,13 @@ jobs:
             gh release upload "$GITHUB_REF_NAME" \
               PrivAI-SideStore.ipa \
               source.json \
+              sidestore.json \
               --clobber
           else
             gh release create "$GITHUB_REF_NAME" \
               PrivAI-SideStore.ipa \
               source.json \
+              sidestore.json \
               --title "Priv AI $GITHUB_REF_NAME" \
               --generate-notes
           fi
@@ -204,8 +212,12 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           cp source.json "$RUNNER_TEMP/source.json"
+          # The generated feed modifies a tracked file on a detached tag.
+          # Restore it before switching branches; the generated copy is safe
+          # in RUNNER_TEMP and is copied back immediately afterwards.
+          git restore --source=HEAD --worktree -- source.json
           git fetch origin main
-          git checkout main
+          git checkout -B main origin/main
           cp "$RUNNER_TEMP/source.json" source.json
 
           git config user.name "github-actions[bot]"

@@ -78,10 +78,10 @@ open localLLM.xcodeproj
 Tagged releases publish both the unsigned IPA and a SideStore-compatible source. After the first `v*` release is available, add this source URL in SideStore:
 
 ```text
-https://github.com/jbenzaquen42/localllm/releases/latest/download/sidestore.json
+https://raw.githubusercontent.com/jbenzaquen42/localllm/main/source.json
 ```
 
-The feed points to the matching release IPA, so future tagged releases appear as updates in SideStore.
+The canonical feed points to each matching release IPA, so future tagged releases appear as updates in SideStore. The older `releases/latest/download/sidestore.json` URL remains published as a compatibility alias.
 
 > **Apple Developer account note:** A free account is fine for running it on your own device. HealthKit capability works on free accounts for personal builds, you don't need the paid $99/yr program unless you want to distribute via TestFlight or the App Store.
 

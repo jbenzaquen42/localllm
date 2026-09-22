@@ -705,8 +705,8 @@
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/mattt/llama.swift";
 			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.8940.0;
+				kind = exactVersion;
+				version = 2.10549.0;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
