@@ -284,6 +284,7 @@ jobs:
             --commit-message "Publish Swiftlet Heretic QPack"
 
       - name: Verify published repository layout
+        if: ${{ inputs.preflight_only != true }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_DEST_REPO: ${{ inputs.hf_repo }}
