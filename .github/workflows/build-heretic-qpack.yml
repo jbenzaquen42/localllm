@@ -30,9 +30,9 @@ jobs:
       SOURCE_REPO: froggeric/Qwen3.6-35B-A3B-Uncensored-Heretic-MLX-4bit
       SWIFTLET_COMMIT: 909c04213c9deb369dac0679d0872512cf3ab32e
       TRUENAS_HOST: 100.93.46.67
-      TRUENAS_SHARE: storage-share
-      QPACK_PARENT_RELATIVE_PATH: Upload/qpack-builds
-      QPACK_RELATIVE_PATH: Upload/qpack-builds/qwen3.6-35b-heretic.qpack
+      TRUENAS_SHARE: qpack-builds
+      QPACK_PARENT_RELATIVE_PATH: .
+      QPACK_RELATIVE_PATH: qwen3.6-35b-heretic.qpack
       HF_XET_HIGH_PERFORMANCE: "1"
 
     steps:
@@ -135,7 +135,7 @@ jobs:
 
           echo "QPACK_PATH=$QPACK_PATH" >> "$GITHUB_ENV"
           echo "HF_XET_CACHE=$HF_XET_CACHE" >> "$GITHUB_ENV"
-          echo "Mounted TrueNAS storage-share/Upload with $((AVAILABLE_KB / 1024 / 1024)) GiB free."
+          echo "Mounted the dedicated TrueNAS qpack-builds HDD share with $((AVAILABLE_KB / 1024 / 1024)) GiB free."
           echo "SMB write probe passed. No model files were downloaded or written."
 
       - name: Build Swiftlet repacker
