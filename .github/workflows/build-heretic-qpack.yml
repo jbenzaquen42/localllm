@@ -8,6 +8,11 @@ on:
         required: true
         default: jbenzaquen42/Qwen3.6-35B-A3B-Uncensored-Heretic-QPack
         type: string
+      preflight_only:
+        description: Only verify Tailscale, SMB write access, and HDD free space
+        required: true
+        default: true
+        type: boolean
 
 concurrency:
   group: build-heretic-qpack
@@ -25,14 +30,16 @@ jobs:
       SOURCE_REPO: froggeric/Qwen3.6-35B-A3B-Uncensored-Heretic-MLX-4bit
       SWIFTLET_COMMIT: 909c04213c9deb369dac0679d0872512cf3ab32e
       TRUENAS_HOST: 100.93.46.67
-      TRUENAS_SHARE: ssd-pool
-      QPACK_RELATIVE_PATH: qpack-builds/qwen3.6-35b-heretic.qpack
+      TRUENAS_SHARE: storage-share
+      QPACK_PARENT_RELATIVE_PATH: Upload/qpack-builds
+      QPACK_RELATIVE_PATH: Upload/qpack-builds/qwen3.6-35b-heretic.qpack
       HF_XET_HIGH_PERFORMANCE: "1"
 
     steps:
       - name: Validate required secrets and input
         env:
           HF_DEST_REPO: ${{ inputs.hf_repo }}
+          PREFLIGHT_ONLY: ${{ inputs.preflight_only }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           SMB_USERNAME: ${{ secrets.TRUENAS_SMB_USERNAME }}
           SMB_PASSWORD: ${{ secrets.TRUENAS_SMB_PASSWORD }}
@@ -40,12 +47,17 @@ jobs:
           TS_CLIENT_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
         run: |
           set -euo pipefail
-          for name in HF_TOKEN SMB_USERNAME SMB_PASSWORD TS_CLIENT_ID TS_CLIENT_SECRET; do
+          for name in SMB_USERNAME SMB_PASSWORD TS_CLIENT_ID TS_CLIENT_SECRET; do
             if [ -z "${!name:-}" ]; then
               echo "::error::Required repository secret $name is not configured."
               exit 1
             fi
           done
+
+          if [ "$PREFLIGHT_ONLY" != "true" ] && [ -z "$HF_TOKEN" ]; then
+            echo "::error::Repository secret HF_TOKEN is required to build and publish the QPack."
+            exit 1
+          fi
 
           if ! [[ "$HF_DEST_REPO" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
             echo "::error::hf_repo must use the owner/name format."
@@ -105,23 +117,34 @@ jobs:
           PY
 
           QPACK_PATH="$MOUNT_POINT/$QPACK_RELATIVE_PATH"
-          mkdir -p "$(dirname "$QPACK_PATH")"
+          QPACK_PARENT="$MOUNT_POINT/$QPACK_PARENT_RELATIVE_PATH"
+          HF_XET_CACHE="$QPACK_PARENT/.hf-xet-cache"
+          mkdir -p "$QPACK_PARENT"
+
+          PROBE_PATH="$QPACK_PARENT/.gha-write-probe-$GITHUB_RUN_ID"
+          printf '%s' "$GITHUB_RUN_ID" > "$PROBE_PATH"
+          test "$(cat "$PROBE_PATH")" = "$GITHUB_RUN_ID"
+          rm -f "$PROBE_PATH"
 
           AVAILABLE_KB="$(df -Pk "$MOUNT_POINT" | awk 'NR == 2 {print $4}')"
-          REQUIRED_KB=$((30 * 1024 * 1024))
+          REQUIRED_KB=$((50 * 1024 * 1024))
           if [ "$AVAILABLE_KB" -lt "$REQUIRED_KB" ]; then
-            echo "::error::TrueNAS share needs at least 30 GiB free; only $((AVAILABLE_KB / 1024 / 1024)) GiB is available."
+            echo "::error::TrueNAS HDD share needs at least 50 GiB free for the QPack and resumable upload cache; only $((AVAILABLE_KB / 1024 / 1024)) GiB is available."
             exit 1
           fi
 
           echo "QPACK_PATH=$QPACK_PATH" >> "$GITHUB_ENV"
-          echo "Mounted TrueNAS with $((AVAILABLE_KB / 1024 / 1024)) GiB free."
+          echo "HF_XET_CACHE=$HF_XET_CACHE" >> "$GITHUB_ENV"
+          echo "Mounted TrueNAS storage-share/Upload with $((AVAILABLE_KB / 1024 / 1024)) GiB free."
+          echo "SMB write probe passed. No model files were downloaded or written."
 
       - name: Build Swiftlet repacker
+        if: ${{ inputs.preflight_only != true }}
         working-directory: Swiftlet
         run: swift build -c release --product swiftlet-repack
 
       - name: Lock source and converter revisions
+        if: ${{ inputs.preflight_only != true }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -161,6 +184,7 @@ jobs:
           fi
 
       - name: Repack Heretic MLX checkpoint into QPack
+        if: ${{ inputs.preflight_only != true }}
         working-directory: Swiftlet
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -182,6 +206,7 @@ jobs:
           fi
 
       - name: Validate QPack structure
+        if: ${{ inputs.preflight_only != true }}
         run: |
           set -euo pipefail
           test -f "$QPACK_PATH/manifest.json"
@@ -205,6 +230,7 @@ jobs:
           du -sh "$QPACK_PATH"
 
       - name: Add Hugging Face model card
+        if: ${{ inputs.preflight_only != true }}
         env:
           HF_DEST_REPO: ${{ inputs.hf_repo }}
         run: |
@@ -235,6 +261,7 @@ jobs:
           EOF
 
       - name: Install Hugging Face uploader
+        if: ${{ inputs.preflight_only != true }}
         run: |
           python3 -m venv "$RUNNER_TEMP/hf-venv"
           "$RUNNER_TEMP/hf-venv/bin/python" -m pip install --upgrade pip
@@ -242,9 +269,12 @@ jobs:
           echo "$RUNNER_TEMP/hf-venv/bin" >> "$GITHUB_PATH"
 
       - name: Create repository and upload QPack
+        if: ${{ inputs.preflight_only != true }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_DEST_REPO: ${{ inputs.hf_repo }}
+          HF_HOME: ${{ runner.temp }}/huggingface
+          HF_HUB_CACHE: ${{ runner.temp }}/huggingface/hub
         run: |
           set -euo pipefail
           export PATH="$HOME/Library/Python/$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')/bin:$PATH"
