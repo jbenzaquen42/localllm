@@ -1,0 +1,76 @@
+diff --git a/Sources/SwiftletCore/StreamingInstaller.swift b/Sources/SwiftletCore/StreamingInstaller.swift
+index b484d5c..306b729 100644
+--- a/Sources/SwiftletCore/StreamingInstaller.swift
++++ b/Sources/SwiftletCore/StreamingInstaller.swift
+@@ -659,5 +659,7 @@ final class HTTPChunkPump: NSObject, URLSessionDataDelegate {
+     private let fromByte: Int
+     private var queue: [Data] = []
++    private var queuedBytes = 0
++    private let maxQueuedBytes = 8 * 1024 * 1024
+     private var finished = false
+     private var failure: Error?
+     private let lock = NSCondition()
+@@ -672,8 +674,14 @@ final class HTTPChunkPump: NSObject, URLSessionDataDelegate {
+         let config = URLSessionConfiguration.ephemeral
+         config.timeoutIntervalForRequest = 120
+         let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+-        defer { session.invalidateAndCancel() }
++        defer {
++            lock.lock()
++            finished = true
++            lock.broadcast()
++            lock.unlock()
++            session.invalidateAndCancel()
++        }
+         var req = URLRequest(url: url)
+         if fromByte > 0 {
+             req.setValue("bytes=\(fromByte)-", forHTTPHeaderField: "Range")
+         }
+@@ -697,4 +705,8 @@ final class HTTPChunkPump: NSObject, URLSessionDataDelegate {
+             let chunk = queue.isEmpty ? nil : queue.removeFirst()
++            if let chunk {
++                queuedBytes -= chunk.count
++                lock.broadcast()
++            }
+             let done = finished && queue.isEmpty && chunk == nil
+             let err = failure
+             lock.unlock()
+@@ -729,6 +741,6 @@ final class HTTPChunkPump: NSObject, URLSessionDataDelegate {
+         lock.lock()
+         failure = StreamingInstaller.Error.httpError(url.lastPathComponent, code)
+         finished = true
+-        lock.signal()
++        lock.broadcast()
+         lock.unlock()
+         completionHandler(.cancel)
+@@ -737,6 +749,19 @@ final class HTTPChunkPump: NSObject, URLSessionDataDelegate {
+     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+         lock.lock()
++        // Backpressure the URLSession delegate when the consumer is slower
++        // than the network (for example, while pwrite waits on a NAS share).
++        // A single callback can exceed the cap, but queued memory remains
++        // bounded by the cap plus at most that one callback's Data value.
++        while !finished && failure == nil && !queue.isEmpty
++                && queuedBytes + data.count > maxQueuedBytes {
++            lock.wait()
++        }
++        guard !finished && failure == nil else {
++            lock.unlock()
++            return
++        }
+         queue.append(data)
+-        lock.signal()
++        queuedBytes += data.count
++        lock.broadcast()
+         lock.unlock()
+     }
+@@ -744,8 +769,8 @@ final class HTTPChunkPump: NSObject, URLSessionDataDelegate {
+     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+         lock.lock()
+         if let error { failure = error }
+         finished = true
+-        lock.signal()
++        lock.broadcast()
+         lock.unlock()
+     }
+ }

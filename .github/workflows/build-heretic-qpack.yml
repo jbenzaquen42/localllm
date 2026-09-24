@@ -74,6 +74,16 @@ jobs:
           ref: ${{ env.SWIFTLET_COMMIT }}
           path: Swiftlet
 
+      - name: Apply bounded HTTP buffering fix
+        if: ${{ inputs.preflight_only != true }}
+        run: |
+          set -euo pipefail
+          PATCH="$GITHUB_WORKSPACE/patches/swiftlet-bounded-http-pump.patch"
+          git -C Swiftlet apply --check "$PATCH"
+          git -C Swiftlet apply "$PATCH"
+          git -C Swiftlet diff --check
+          git -C Swiftlet diff --stat
+
       - name: Select Xcode 26.2
         run: |
           sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
@@ -113,7 +123,9 @@ jobs:
           share = quote(os.environ["TRUENAS_SHARE"], safe="")
           mount_point = os.environ["MOUNT_POINT"]
           remote = f"//{user}:{password}@{host}/{share}"
-          subprocess.run(["mount_smbfs", remote, mount_point], check=True)
+          # A soft mount makes a lost NAS connection fail file operations
+          # instead of holding the hosted runner in a kernel-level SMB wait.
+          subprocess.run(["mount", "-t", "smbfs", "-o", "soft,nobrowse", remote, mount_point], check=True)
           PY
 
           QPACK_PATH="$MOUNT_POINT/$QPACK_RELATIVE_PATH"
@@ -152,6 +164,7 @@ jobs:
           mkdir -p "$QPACK_PATH"
 
           SWIFTLET_SHA="$(git -C Swiftlet rev-parse HEAD)"
+          SWIFTLET_PATCH_SHA="$(shasum -a 256 "$GITHUB_WORKSPACE/patches/swiftlet-bounded-http-pump.patch" | awk '{print $1}')"
           SOURCE_SHA="$({
             curl --fail --silent --show-error --location --retry 3 \
               -H "Authorization: Bearer $HF_TOKEN" \
@@ -164,13 +177,23 @@ jobs:
               --arg source_repo "$SOURCE_REPO" \
               --arg source_sha "$SOURCE_SHA" \
               --arg swiftlet_sha "$SWIFTLET_SHA" \
+              --arg swiftlet_patch_sha "$SWIFTLET_PATCH_SHA" \
               '.source_repo == $source_repo
                and .source_sha == $source_sha
-               and .swiftlet_sha == $swiftlet_sha' \
+               and .swiftlet_sha == $swiftlet_sha
+               and ((.swiftlet_patch_sha // $swiftlet_patch_sha) == $swiftlet_patch_sha)' \
               "$LOCK_PATH" >/dev/null || {
                 echo "::error::Existing QPack work does not match the current source or Swiftlet revision."
                 exit 1
               }
+            if ! jq -e --arg swiftlet_patch_sha "$SWIFTLET_PATCH_SHA" \
+              '.swiftlet_patch_sha == $swiftlet_patch_sha' "$LOCK_PATH" >/dev/null; then
+              LOCK_TMP="$LOCK_PATH.tmp-$GITHUB_RUN_ID"
+              jq --arg swiftlet_patch_sha "$SWIFTLET_PATCH_SHA" \
+                '. + {swiftlet_patch_sha: $swiftlet_patch_sha}' "$LOCK_PATH" > "$LOCK_TMP"
+              mv "$LOCK_TMP" "$LOCK_PATH"
+              echo "Recorded the compatible transport patch in the existing checkpoint lock."
+            fi
           elif find "$QPACK_PATH" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
             echo "::error::Existing QPack work has no source lock; refusing to mix checkpoints."
             exit 1
@@ -179,7 +202,8 @@ jobs:
               --arg source_repo "$SOURCE_REPO" \
               --arg source_sha "$SOURCE_SHA" \
               --arg swiftlet_sha "$SWIFTLET_SHA" \
-              '{source_repo: $source_repo, source_sha: $source_sha, swiftlet_sha: $swiftlet_sha}' \
+              --arg swiftlet_patch_sha "$SWIFTLET_PATCH_SHA" \
+              '{source_repo: $source_repo, source_sha: $source_sha, swiftlet_sha: $swiftlet_sha, swiftlet_patch_sha: $swiftlet_patch_sha}' \
               > "$LOCK_PATH"
           fi
 
@@ -190,9 +214,50 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
-          .build/release/swiftlet-repack \
-            --from-hf "$SOURCE_REPO" \
-            --output "$QPACK_PATH"
+          run_repack_with_heartbeat() {
+            .build/release/swiftlet-repack \
+              --from-hf "$SOURCE_REPO" \
+              --output "$QPACK_PATH" &
+            local repack_pid=$!
+            (
+              while kill -0 "$repack_pid" 2>/dev/null; do
+                stats="$(ps -p "$repack_pid" -o etime=,%cpu=,rss= 2>/dev/null || true)"
+                if [ -n "$stats" ]; then
+                  echo "Repack heartbeat (elapsed, CPU%, RSS_KB): $stats"
+                fi
+                sleep 60
+              done
+            ) &
+            local heartbeat_pid=$!
+            local status=0
+            wait "$repack_pid" || status=$?
+            kill "$heartbeat_pid" 2>/dev/null || true
+            wait "$heartbeat_pid" 2>/dev/null || true
+            return "$status"
+          }
+
+          if [ -f "$QPACK_PATH/manifest.json" ]; then
+            jq -e '.magic == "QPACK" and .version == 1' "$QPACK_PATH/manifest.json" >/dev/null
+            echo "A completed QPack manifest already exists; skipping conversion and continuing validation/upload."
+          else
+            attempt=1
+            max_attempts=3
+            while true; do
+              echo "Starting resumable QPack repack attempt $attempt of $max_attempts."
+              if run_repack_with_heartbeat; then
+                break
+              else
+                status=$?
+              fi
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                echo "::error::QPack repack failed after $attempt attempts. Checkpoint files are retained for the next run."
+                exit "$status"
+              fi
+              attempt=$((attempt + 1))
+              echo "::warning::Repack attempt failed with exit code $status; retrying from the on-disk progress checkpoint in 20 seconds."
+              sleep 20
+            done
+          fi
 
           CURRENT_SOURCE_SHA="$({
             curl --fail --silent --show-error --location --retry 3 \
@@ -314,8 +379,6 @@ jobs:
         if: always()
         run: |
           if mount | grep -Fq " on $RUNNER_TEMP/truenas-qpack "; then
-            sync
             diskutil unmount force "$RUNNER_TEMP/truenas-qpack" \
-              || umount "$RUNNER_TEMP/truenas-qpack" \
               || true
           fi
