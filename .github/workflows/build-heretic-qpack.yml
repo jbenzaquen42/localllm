@@ -33,7 +33,6 @@ jobs:
       TRUENAS_SHARE: qpack-builds
       QPACK_PARENT_RELATIVE_PATH: .
       QPACK_RELATIVE_PATH: qwen3.6-35b-heretic.qpack
-      HF_XET_HIGH_PERFORMANCE: "1"
 
     steps:
       - name: Validate required secrets and input
@@ -130,8 +129,20 @@ jobs:
 
           QPACK_PATH="$MOUNT_POINT/$QPACK_RELATIVE_PATH"
           QPACK_PARENT="$MOUNT_POINT/$QPACK_PARENT_RELATIVE_PATH"
-          HF_XET_CACHE="$QPACK_PARENT/.hf-xet-cache"
           mkdir -p "$QPACK_PARENT"
+
+          # Keep the model on the NAS HDD, but put the small Xet upload cache
+          # on the hosted runner's local disk. Xet performs poorly when this
+          # cache itself lives on a network filesystem.
+          QPACK_XET_CACHE_PATH="$RUNNER_TEMP/hf-xet-cache"
+          QPACK_RUNNER_FREE_KB="$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 {print $4}')"
+          if ! [[ "$QPACK_RUNNER_FREE_KB" =~ ^[0-9]+$ ]] || [ "$QPACK_RUNNER_FREE_KB" -lt $((8 * 1024 * 1024)) ]; then
+            echo "::warning::Less than 8 GiB is free on runner temp; using the NAS HDD for the bounded Xet cache."
+            QPACK_XET_CACHE_PATH="$QPACK_PARENT/.hf-xet-cache"
+          else
+            mkdir -p "$QPACK_XET_CACHE_PATH"
+            echo "Using runner-local Xet cache; model files remain on the NAS HDD."
+          fi
 
           PROBE_PATH="$QPACK_PARENT/.gha-write-probe-$GITHUB_RUN_ID"
           printf '%s' "$GITHUB_RUN_ID" > "$PROBE_PATH"
@@ -146,7 +157,8 @@ jobs:
           fi
 
           echo "QPACK_PATH=$QPACK_PATH" >> "$GITHUB_ENV"
-          echo "HF_XET_CACHE=$HF_XET_CACHE" >> "$GITHUB_ENV"
+          echo "HF_XET_CACHE=$QPACK_XET_CACHE_PATH" >> "$GITHUB_ENV"
+          echo "HF_XET_SHARD_CACHE_SIZE_LIMIT=2gb" >> "$GITHUB_ENV"
           echo "Mounted the dedicated TrueNAS qpack-builds HDD share with $((AVAILABLE_KB / 1024 / 1024)) GiB free."
           echo "SMB write probe passed. No model files were downloaded or written."
 
