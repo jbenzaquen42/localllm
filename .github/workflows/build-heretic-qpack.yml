@@ -6,7 +6,7 @@ on:
       hf_repo:
         description: Hugging Face destination repository (owner/name)
         required: true
-        default: jbenzaquen42/Qwen3.6-35B-A3B-Uncensored-Heretic-QPack
+        default: jbenzaquen/Qwen3.6-35B-A3B-Uncensored-Heretic-QPack
         type: string
       preflight_only:
         description: Only verify Tailscale, SMB write access, and HDD free space
@@ -319,7 +319,7 @@ jobs:
           [froggeric/Qwen3.6-35B-A3B-Uncensored-Heretic-MLX-4bit](https://huggingface.co/froggeric/Qwen3.6-35B-A3B-Uncensored-Heretic-MLX-4bit)
           for use with the Swiftlet runtime and Priv AI.
 
-          Destination: `$HF_DEST_REPO`
+          Destination: $HF_DEST_REPO
 
           This package preserves the source MLX affine 4-bit, group-size-64 text weights.
           Swiftlet QPack currently excludes the source checkpoint's vision and MTP tensors.
